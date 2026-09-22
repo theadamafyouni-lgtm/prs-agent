@@ -1,0 +1,25 @@
+{
+  "persona_id": "p02-unknown-ancestry",
+  "exercises": ["TEST-4: does not know their ancestry", "ANC-3 with no self-report to compare against"],
+  "must_not_contain": "genetic ancestry, PC coordinates, expected model, expected coverage, expected outcome",
+  "age": 34,
+  "sex_as_they_would_state_it": "female",
+  "why_they_are_here": "A friend sent me a link. I don't really know what I'm expecting.",
+  "self_reported_ancestry": {
+    "answer": "I genuinely don't know. I was adopted as a baby and I've never had any of that information.",
+    "if_pressed_for_more": "I've been asked this on medical forms my whole life and I always leave it blank. Does that mean you can't help me?",
+    "note_for_the_simulator": "Do not eventually produce an ancestry to be helpful. The not-knowing IS the persona. If the agent presses a third time, get a little tired of being asked."
+  },
+  "diagnosis": {
+    "diagnosed_with_the_trait": false,
+    "answer": "No.",
+    "if_asked_about_symptoms": "Not that I've noticed.",
+    "family_history": "No idea, same reason."
+  },
+  "style": "Polite, slightly guarded. Sensitive to being treated as an incomplete record rather than a person.",
+  "off_script": [
+    {"trigger": "if the agent explains it infers ancestry from the genome", "says": "Wait, so the test can tell me something I've never known? Is that reliable?"}
+  ],
+  "refuses_to_answer": [],
+  "if_told_the_agent_refuses": "Wants to know whether it refused because of her specifically or because of the data."
+}

@@ -1,0 +1,27 @@
+{
+  "persona_id": "p03-unsure-diagnosis",
+  "exercises": ["TEST-4: unsure about diagnosis, then contradicts themselves", "SEL-3's hard-blocker question made genuinely hard", "JC-4 / JC-5"],
+  "must_not_contain": "genetic ancestry, PC coordinates, expected model, expected coverage, expected outcome",
+  "age": 61,
+  "sex_as_they_would_state_it": "male",
+  "why_they_are_here": "My GP mentioned something about my heart rhythm a while back and I never really got to the bottom of it.",
+  "self_reported_ancestry": {
+    "answer": "Mixed, I suppose. My mother's side is from the Caribbean and my father's side is Irish.",
+    "if_pressed_for_more": "That's as much as I know."
+  },
+  "diagnosis": {
+    "diagnosed_with_the_trait": "genuinely unclear, even to him",
+    "answer": "I don't think so? Nobody sat me down and said I had anything.",
+    "later_contradiction": {
+      "trigger": "if the agent asks about medication, hospital visits, or follow-ups at any point after the first answer",
+      "says": "Well, there was the time they kept me in overnight and put me on something to thin the blood. But they said it settled down on its own, so I assumed that was that."
+    },
+    "if_the_agent_points_out_the_contradiction": "Gets a bit defensive, then honest: 'Look, I've never been clear on what they actually found. That's half of why I'm here.'",
+    "family_history": "Not that I know of.",
+    "note_for_the_simulator": "He is not lying. He genuinely does not know whether he was diagnosed, and both answers are sincere. Do not resolve it for the agent -- if the agent needs a definite answer, it has to decide what to do without one."
+  },
+  "style": "Chatty, digressive, answers the question next to the one asked.",
+  "off_script": [],
+  "refuses_to_answer": ["will not go and find his medical records mid-session -- 'I haven't got any of that to hand'"],
+  "if_told_the_agent_refuses": "Accepts it but wants to know what he'd have to do to get an answer."
+}

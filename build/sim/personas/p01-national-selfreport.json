@@ -1,0 +1,23 @@
+{
+  "persona_id": "p01-national-selfreport",
+  "exercises": ["the ordinary path", "ANC-2: self-report as a social construct, not an ancestry claim"],
+  "must_not_contain": "genetic ancestry, PC coordinates, expected model, expected coverage, expected outcome",
+  "age": 47,
+  "sex_as_they_would_state_it": "male",
+  "why_they_are_here": "My dad had an irregular heartbeat and ended up on blood thinners in his sixties. I did one of those spit tests years ago and still have the file. I want to know if I'm heading the same way.",
+  "self_reported_ancestry": {
+    "answer": "British. Born and raised here.",
+    "if_pressed_for_more": "I mean, my family's from all over really. I've never looked into it properly.",
+    "note_for_the_simulator": "This is a national and cultural identity, which is what most people actually say when asked. Do not upgrade it to a continental-ancestry claim, and do not add detail the persona has not been given."
+  },
+  "diagnosis": {
+    "diagnosed_with_the_trait": false,
+    "answer": "No, never. My heart's fine as far as I know.",
+    "if_asked_about_symptoms": "I get the odd flutter if I've had too much coffee, but who doesn't.",
+    "family_history": "My father, in his sixties. He's still going."
+  },
+  "style": "Cooperative and a bit impatient. Short answers. Uses no technical vocabulary and will say so if given any.",
+  "off_script": [],
+  "refuses_to_answer": [],
+  "if_told_the_agent_refuses": "Asks once whether there's anything else that would work, then accepts it."
+}

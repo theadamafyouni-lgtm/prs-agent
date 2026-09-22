@@ -1,0 +1,25 @@
+runs/
+*.vcf.gz
+refdata/
+__pycache__/
+*.pyc
+oracle/
+eval-check-*/
+results/
+work/
+bin/
+sample/
+# sim/ -- the 99 personas ARE the benchmark and belong in the public repo
+test/
+nextflow
+.nextflow/
+.nextflow.log*
+*.log
+docs/research-*.md
+docs/research-index.md
+
+# answer side. live-record-slice-001.md is named in the harness deny-probe list as the most
+# efficient leak in the repo; the cg_truth_* tools are the Complete Genomics truth arm and
+# cg_truth_extract.py hardcodes the patient sample id.
+docs/live-record-slice-001.md
+tools/cg_truth_*.py
