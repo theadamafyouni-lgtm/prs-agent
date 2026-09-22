@@ -247,17 +247,28 @@ def check_cli():
         note(WARN, "node is older than the CLI asks for", out.strip() + " (wants >=22)",
              "it runs with an EBADENGINE warning; upgrade if anything behaves oddly")
 
+    # Headless boxes authenticate with a long-lived token, per SETUP.md section 5. The
+    # interactive credentials file is the fallback, and its four-hourly refresh does not
+    # work headless, which is what killed every earlier batch every few hours.
     cred = os.path.expanduser("~/.claude/.credentials.json")
-    if os.path.isfile(cred):
-        age_h = (os.path.getmtime(cred) and
-                 (__import__("time").time() - os.path.getmtime(cred)) / 3600.0)
-        note(OK if age_h < 8 else WARN, "claude credentials",
+    if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        note(OK, "claude auth", "CLAUDE_CODE_OAUTH_TOKEN is set")
+        if os.path.isfile(cred):
+            note(WARN, "credentials file beside the token", cred,
+                 "SETUP.md section 5: move it aside so it cannot win over the token: "
+                 "mv %s %s.bak" % (cred, cred))
+    elif os.path.isfile(cred):
+        age_h = (__import__("time").time() - os.path.getmtime(cred)) / 3600.0
+        note(OK if age_h < 8 else WARN, "claude credentials (interactive login)",
              "written %.1f hours ago" % age_h,
-             "" if age_h < 8 else "tokens have expired after about four hours on "
-                                  "this account; run `claude`, sign in, then re-pin")
+             "" if age_h < 8 else "this refreshes every four hours and cannot do so "
+                                  "headless; use the token in SETUP.md section 5")
     else:
-        note(FAIL, "no ~/.claude/.credentials.json", "the agent cannot authenticate",
-             "run `claude`, sign in, exit, THEN re-pin the CLI to 2.1.224")
+        note(FAIL, "no claude authentication",
+             "neither CLAUDE_CODE_OAUTH_TOKEN nor ~/.claude/.credentials.json",
+             "SETUP.md section 5: `claude setup-token` on a machine with a browser, "
+             "export CLAUDE_CODE_OAUTH_TOKEN in ~/.bashrc, then open a NEW shell -- "
+             "one that predates the edit does not have it")
 
 
 def check_context_pollution():
