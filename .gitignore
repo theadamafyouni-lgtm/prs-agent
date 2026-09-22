@@ -89,3 +89,6 @@ results/
 
 # personas live in the private companion repo prs-agent-private
 build/sim/personas/eval/
+
+# corpus tooling lives in the private companion repo
+vm/
