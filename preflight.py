@@ -285,6 +285,53 @@ def check_disk():
         note(OK, "disk", "%.0f GB free" % free)
 
 
+def check_private_restore():
+    """The pieces the public repo cannot carry, restored from prs-agent-private.
+
+    Missing any of them is not silent -- config.py raises at import, and a case with
+    no persona file fails at staging -- but it fails late, at the first run. Checking
+    here turns that into two seconds.
+    """
+    tok = (os.environ.get("PRS_HARNESS_TOKENS")
+           or os.path.expanduser("~/.config/prs-harness/tokens.json"))
+    if not os.path.isfile(tok):
+        note(FAIL, "launch-gate tokens missing", tok,
+             "restore from the private repo: install -m 600 "
+             "<prs-agent-private>/gate/tokens.json " + tok)
+    elif os.stat(tok).st_mode & 0o077:
+        note(FAIL, "launch-gate tokens readable by others",
+             "mode %o" % (os.stat(tok).st_mode & 0o777), "chmod 600 " + tok)
+    else:
+        rc, out = run([sys.executable, "-c",
+                       "import sys; sys.path.insert(0, %r); from harness import config; "
+                       "print(len(config.HARD_TOKENS), len(config.PROVIDER_HARD_TOKENS))"
+                       % os.path.join(REPO, "harness")])
+        if rc == 0:
+            hard, prov = (out.split() + ["?", "?"])[:2]
+            note(OK, "launch-gate tokens", "%s hard, %s provider" % (hard, prov))
+        else:
+            last = (out.strip().splitlines() or [""])[-1][:120]
+            note(FAIL, "launch-gate tokens rejected by config.py", last,
+                 "restore the file again from the private repo")
+
+    pdir = os.path.join(REPO, "build", "sim", "personas", "eval")
+    n = (len([f for f in os.listdir(pdir) if f.startswith("p") and f.endswith(".json")])
+         if os.path.isdir(pdir) else 0)
+    if n == 99:
+        note(OK, "personas", "99 in build/sim/personas/eval")
+    else:
+        note(FAIL, "personas", "%d found, expected 99" % n,
+             "cp <prs-agent-private>/personas/* build/sim/personas/eval/")
+
+    key = os.path.join(REPO, "answer-side", "answer-sets.csv")
+    if os.path.isfile(key):
+        note(OK, "answer key", "answer-side/answer-sets.csv")
+    else:
+        note(WARN, "answer key missing",
+             "cases run without it; grade.py cannot",
+             "cp <prs-agent-private>/answer-key/answer-sets.csv answer-side/")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--quiet", action="store_true", help="only problems")
@@ -293,6 +340,7 @@ def main():
 
     check_python_packages()
     check_host_binaries()
+    check_private_restore()
     check_refdata_binaries()
     check_refdata_trees()
     check_shim()

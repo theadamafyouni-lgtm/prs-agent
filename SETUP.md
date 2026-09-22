@@ -98,41 +98,68 @@ Two things learned on 2026-09-05:
 Move any stored credentials aside once the token works, so it cannot lose to them:
 `mv ~/.claude/.credentials.json ~/.claude/.credentials.json.bak`.
 
-## 6. The repository
+## 6. The repositories
 
-The VM runs a clone of the **public** repo, `theadamafyouni-lgtm/prs-agent-public`,
-branch `master`. The Mac pushes to the **private** `prs-agent` on `main`. **They are
-different repositories and `git pull` will never move work between them.**
+Two, and the VM needs both.
+
+| repo | visibility | holds |
+|---|---|---|
+| `theadamafyouni-lgtm/prs-agent` | public | the agent, the harness, the grader, `sandbox-exec` |
+| `theadamafyouni-lgtm/prs-agent-private` | private | personas, answer key, launch-gate tokens, corpus tooling, the 582 original results |
+
+The split is not tidiness. Each persona pairs a real Personal Genome Project
+participant's survey answers with an invented medical history, and the gate tokens are
+the participant identifiers themselves. Neither can be public. The Mac's old repository,
+with the full history, is `prs-agent-copy`; it is private and nothing here uses it.
 
 ```bash
-cd /root && git clone https://github.com/theadamafyouni-lgtm/prs-agent-public.git \
-    CliGenAI-Lab/prs-agent-product
+gh auth login                      # the private clone needs it
+cd /root
+git clone https://github.com/theadamafyouni-lgtm/prs-agent.git CliGenAI-Lab/prs-agent-product
+git clone https://github.com/theadamafyouni-lgtm/prs-agent-private.git prs-agent-private
 ```
 
-Then, by hand, because they are gitignored in one repo or absent from the other:
+Then restore what the public repo cannot carry:
 
-- `answer-side/answer-sets.csv` — the key, 99 rows
-- `vm/` from the **private** repo: `run_corpus.py`, `corpus_watch.py`,
-  `corpus_watchdog.sh`, the Linux `config.py` and `profile.py`, the three port patches,
-  `make_broken_fixtures.py`, `build_case_list.py`, `probe.py`. **These are the Linux
-  port and they exist nowhere else.**
+```bash
+P=/root/CliGenAI-Lab/prs-agent-product
+V=/root/prs-agent-private
 
-`run_corpus.py`, the dashboard and the watchdog live at `/root`, not in the repo tree.
+install -d -m 700 ~/.config/prs-harness
+install -m 600 "$V/gate/tokens.json" ~/.config/prs-harness/tokens.json
+
+mkdir -p "$P/build/sim/personas/eval" "$P/answer-side" "$P/vm"
+cp "$V"/personas/*                 "$P/build/sim/personas/eval/"
+cp "$V/answer-key/answer-sets.csv" "$P/answer-side/"
+cp "$V"/batch-scripts/*.sh         "$P/harness/"
+cp "$V"/vm/*.py                    "$P/vm/"
+cp "$V"/vm-scripts/*               /root/
+```
+
+**Restore the token file before running anything.** `harness/harness/config.py` loads it
+at import and fails closed: without it every harness command, `--help` included, raises
+and names the path. That is deliberate. An empty token list would let the launch gate
+report `passed` while checking nothing.
+
+`$V/results/` and `$V/graded/` are the 582 original runs and their grades. They are not
+restored; they are what a rerun is compared against.
+
+`preflight.py` checks the tokens, the personas and the key.
 
 ## 7. The Linux port
 
-Three patches turn the macOS harness into a Linux one. They are one-time and already
-applied on the working box; on a fresh clone they have to be run again.
+The committed harness is already the Linux build: `config.py` says so in its
+docstring, and `profile.py` and `probe.py` were confirmed byte-identical to the VM's
+working copies on 2026-09-15. The three patches that produced it are kept in the
+private repo under `vm-scripts/`, restored to `/root` by section 6, in case a fresh
+clone turns out to need them:
 
 - `patch_clone_refdata_linux.py` — hard links instead of APFS copy-on-write
 - `patch_hardlink_gate_linux.py` — the launch gate's clone step
 - `patch_neutral_patient_name.py` — filename neutralisation
 
-And `config.py` / `profile.py` replace their macOS counterparts in
-`harness/harness/`. The docstrings say which five places `config.py` diverges in.
-
-**UNVERIFIED in what order, and whether the patches are idempotent.** Read each before
-running it.
+**UNVERIFIED whether a fresh clone needs them.** If the gate run in section 10 fails at
+staging, look here first. Read each before running it.
 
 ## 8. Reference data, about 24 GB
 
@@ -156,15 +183,19 @@ What has to end up present:
 
 ## 9. Fixtures and personas
 
-Personas are tracked in the public repo at `build/sim/personas/eval/`, 99 of them.
+Personas come from the private repo, restored by section 6 to
+`build/sim/personas/eval/`, 99 of them.
 
 The ten damaged fixtures are **built, not downloaded**: `make_broken_fixtures.py`
+(private repo, `vm-scripts/`, restored to `/root`)
 damages a real assay and writes a `.provenance.json` beside each recording what was done
 and the source checksum. They live in `pgp-candidates/<participant>/broken/`.
 
-**UNVERIFIED whether `pgp-candidates/` itself is in the clone**, and it holds the real
-patient genomes and the CG truth files. If it is not, it is another by-hand copy and a
-large one.
+**`pgp-candidates/` is in neither repository.** Confirmed on 2026-09-15: it holds the
+real participant genomes and the CG truth files, and no path under it is tracked. The
+files are public PGP data, but **there is no script that fetches them**, so a wiped
+box has no way to get them back except a copy from somewhere else. Back it up before
+any wipe. The broken fixtures are built from it, so they go with it.
 
 ## 10. Prove it before trusting it
 
