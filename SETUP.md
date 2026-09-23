@@ -199,25 +199,123 @@ clone turns out to need them:
 **UNVERIFIED whether a fresh clone needs them.** If the gate run in section 10 fails at
 staging, look here first. Read each before running it.
 
-## 8. Reference data, about 24 GB
+## 8. Reference data, about 49 GB
+
+> **This section is not a procedure, and you cannot rebuild `build/refdata` from these
+> two repositories.** Roughly 29 GB of it is fetched by nothing, anywhere. Tested
+> 2026-09-23 against the working box; what follows says which parts work and which do
+> not, so nobody else spends a day finding out. Do not wipe a machine that has this data
+> until the gap below is closed.
+
+`build/refdata` measures **49 GB** on the working box, in three tiers with three different
+origins. Only the first can be obtained by running something in this repository.
+
+| tier | size | where it comes from |
+|---|---|---|
+| manifest artifacts | 10.3 GB recorded (32 records); the default `selection` profile fetches 10 of them, **4.0 GB** | `build/tools/stage_refdata.sh`, then `fetch_refdata.py`. **Works.** |
+| `ancestry-ref/hgdp_1kgp/` (14 GB) + `ancestry-ref/phase3/` (15 GB) | **29 GB** | **nothing.** No script, no manifest entry, no URL in either repository. This is the gap |
+| `ancestry-ref/hgdp_basis/` (8.6 GB) + `build/` + `build_p3chr1/` | 8.9 GB | derived from `hgdp_1kgp/` by five plink2 commands that existed only as text inside a log file. Now recorded — see step 4 |
+
+### The parts that work
 
 ```bash
-python3 fetch_refdata.py            # pulls from build/refdata/MANIFEST.json
-python3 reference-provider/build_reference.py
+# 1. The manifest is NOT in this repository. It lives in the private repo, because
+#    until 2026-09-23 the only copy on earth was inside the directory a wipe deletes.
+#    fetch_refdata.py exits immediately without it.
+mkdir -p build/refdata
+cp /root/prs-agent-private/refdata-recipe/MANIFEST.json build/refdata/MANIFEST.json
+
+# 2. Fetch the 10 selection-profile artifacts (~4.0 GB), or --profile full for all 32
+#    (~10.3 GB, adding the 22 per-chromosome imputation panel files). No case in the
+#    selection benchmark opens the panel.
+python3 fetch_refdata.py
+
+# 3. Check what landed.
+python3 fetch_refdata.py --verify
 ```
 
-**UNVERIFIED — this is the step most likely to fail.** `fetch_refdata.py` has never run
-on a box that did not already have the data, and `build_reference.py` builds the PCA
-basis, which is the slow half. Budget hours, not minutes.
+`stage_refdata.sh` is the script that originally *wrote* the manifest, and it can write a
+fresh one if you would rather re-derive than copy. **It resolves macOS builds** —
+`plink2_mac_arm64_*.zip` and an `api.adoptium.net/.../mac/aarch64/...` JRE — because that
+is where it was first run. On Linux, `fetch_refdata.py` substitutes the linux/x64 JRE and
+says so out loud, but **it does not fix plink2**; replace that yourself and `chmod +x` it.
+This is why `--verify` permanently reports `MISMATCH plink2` and `MISSING jre` on a Linux
+box. Those two are expected. `fasta` and `maps` MISSING are not.
 
-What has to end up present:
+### The part that does not work, and has no workaround
 
-- `build/refdata/ancestry-ref/hgdp_1kgp/` — the HGDP+1kGP panel, the projection basis
-- `build/refdata/ancestry-ref/hgdp_basis/prune.prune.in` — 230,243 pruned markers
-- `build/refdata/panel/` — the imputation panel, bref3 per chromosome
+```
+build/refdata/ancestry-ref/hgdp_1kgp/    14 GB   GRCh37_HGDP+1kGP_ALL.{pgen,pvar.zst,psam}
+build/refdata/ancestry-ref/phase3/       15 GB   chr1-22 .vcf.gz + .tbi
+```
+
+**Neither is in `MANIFEST.json`. Neither is fetched by `fetch_refdata.py`, by
+`stage_refdata.sh`, or by any other script in either repository. There is no URL for
+either anywhere in the tracked tree.** `reference-provider/build_reference_panel.py`
+takes `phase3/` as a required input (`--phase3-dir`); nothing produces it.
+
+Today the only way to get these 29 GB is to copy them from a machine that already has
+them. **Somebody has to write this acquisition step.** Until then `build/refdata` cannot
+be reconstructed, and neither can anything downstream of it.
+
+### Building the PCA basis, once `hgdp_1kgp/` exists
+
+`reference-provider/build_reference.py` **does not do this.** It builds a per-patient
+INT-1 reference distribution, takes six required arguments, and contains no network code
+and no reference to `hgdp_basis`. Earlier versions of this section named it here; that was
+wrong.
+
+The basis was built by five plink2 commands run by hand on macOS on 2026-08-12. They were
+recorded only inside `build/refdata/ancestry-ref/hgdp_basis/plink.log` — that is, only
+inside the directory a wipe deletes. Those logs are now in the private repo at
+`prs-agent-private/refdata-recipe/`, and the chain is:
+
+```bash
+B=build/refdata/ancestry-ref
+plink2 --pfile $B/hgdp_1kgp/GRCh37_HGDP+1kGP_ALL vzs --autosome --snps-only just-acgt \
+       --max-alleles 2 --set-all-var-ids @:# --rm-dup exclude-all --maf 0.05 --geno 0.02 \
+       --make-pgen --out $B/hgdp_basis/ref_raw
+plink2 --pfile $B/hgdp_basis/ref_raw    --extract $B/hgdp_basis/nonpalindromic.ids \
+       --make-pgen --out $B/hgdp_basis/ref_nonpal
+plink2 --pfile $B/hgdp_basis/ref_nonpal --indep-pairwise 200 50 0.2 \
+       --out $B/hgdp_basis/prune
+plink2 --pfile $B/hgdp_basis/ref_nonpal --extract $B/hgdp_basis/prune.prune.in \
+       --make-pgen --out $B/hgdp_basis/ref_pruned
+plink2 --pfile $B/hgdp_basis/ref_pruned --freq --pca allele-wts 20 \
+       --out $B/hgdp_basis/ref_pca
+```
+
+Two warnings about this chain:
+
+- **`nonpalindromic.ids` (62 MB) is an input to step 2 and has no generating script
+  either.** It is in no repository. Same problem as the 29 GB, smaller.
+- **It has only ever run on macOS**, with `plink2 v2.0.0-a.7.1 M1`. The Linux binary in
+  refdata is `v2.0.0-a.6.6LM 64-bit Intel`. Whether a Linux rerun reproduces
+  `prune.prune.in` byte-for-byte is **untested**, and it matters: that file's sha256 is
+  `64a05450cb77fb3e974c8b16312d0a7f3d0639794e7ffb6807600f30b61f039e` and a rerun that
+  does not reproduce it is not reproducing the published results.
+
+It is not slow, whatever this section used to say. The logs timestamp the whole basis
+build at **1 minute 47 seconds** (12:53:29 → 12:55:16). The hours go into the downloads
+and into moving the 29 GB, not into the PCA.
+
+### What has to end up present
+
+- `build/refdata/ancestry-ref/hgdp_1kgp/` — the HGDP+1kGP panel, the projection basis.
+  **No fetch step exists**
+- `build/refdata/ancestry-ref/phase3/` — 1000G phase3 b37 VCFs, chr1–22.
+  **No fetch step exists**
+- `build/refdata/ancestry-ref/hgdp_basis/prune.prune.in` — 230,243 pruned markers,
+  sha256 `64a05450cb77fb3e974c8b16312d0a7f3d0639794e7ffb6807600f30b61f039e`
+- `build/refdata/panel/` — the imputation panel, bref3 per chromosome. **Only fetched by
+  `--profile full`**; the selection benchmark never opens it
 - `build/refdata/fasta/GRCh37.fa.gz` — 751 MB bgzipped, plus `.fai` and `.gzi`
 - `build/refdata/maps/` — genetic maps
-- `build/refdata/bin/` — `plink2`, `liftOver`, `beagle.jar`, `bref3.jar`, the JRE
+- `build/refdata/bin/` — `plink2`, `liftOver`, `beagle.jar`, `bref3.jar`, `unbref3.jar`
+- `build/refdata/jre/` — the bundled JRE. **Not in `bin/`**, as this section used to say.
+  On the working box every file in `jre/bin/` is mode 644, `java` included;
+  `setup.sh`'s `chmod 755` covers `refdata/bin/*` only. Nothing currently uses it —
+  `preflight.py` checks `/usr/bin/java` — but it is the plink2 mode-644 trap, unfixed
 
 ## 9. Fixtures and personas
 
