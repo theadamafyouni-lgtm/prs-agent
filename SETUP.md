@@ -327,11 +327,26 @@ The ten damaged fixtures are **built, not downloaded**: `make_broken_fixtures.py
 damages a real assay and writes a `.provenance.json` beside each recording what was done
 and the source checksum. They live in `pgp-candidates/<participant>/broken/`.
 
-**`pgp-candidates/` is in neither repository.** Confirmed on 2026-09-15: it holds the
-real participant genomes and the CG truth files, and no path under it is tracked. The
-files are public PGP data, but **there is no script that fetches them**, so a wiped
-box has no way to get them back except a copy from somewhere else. Back it up before
-any wipe. The broken fixtures are built from it, so they go with it.
+**`pgp-candidates/` itself is in neither repository.** It holds the real participant
+genomes and the CG truth files, and no path under it is tracked. Back it up before any
+wipe. The broken fixtures are built from it, so they go with it.
+
+**The scripts that fetch it are in the private repo**, at
+`prs-agent-private/pgp-fetch/`. Earlier versions of this section said "there is no script
+that fetches them", which was wrong: `dl2.sh` and `dl3.sh` pull every participant's CG
+truth file from `evidence.pgp-hms.org` and every assay from
+`my.pgp-hms.org/user_file/download/<id>`, and `dl_truth.tsv`, `manifest.tsv`,
+`profile_files.tsv` and `cg_inventory.csv` record which candidates were selected and why.
+They were only ever stored *inside* `pgp-candidates/`, so a wipe destroyed the recipe
+along with the data. They were copied out to the private repo on 2026-09-23.
+
+They are in the **private** repo, not this one, because the file names and tables carry
+participant identifiers, which are also the launch-gate tokens.
+
+**UNVERIFIED whether re-running them still works.** The scripts date from 2026-07-22 and
+have not been re-run since; whether the PGP endpoints still serve those file IDs is
+unknown. Until somebody tests that, treat `pgp-candidates/` as irreplaceable and keep the
+backup.
 
 ## 10. Prove it before trusting it
 
