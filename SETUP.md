@@ -113,11 +113,12 @@ reads like a permissions error. This is the single most expensive thing to get w
 
 **The pin is only as good as your `PATH`.** npm installs to `/usr/bin/claude`, and
 `/usr/local/bin` comes before `/usr/bin` on Ubuntu — so a second `claude` there silently
-wins and the pin means nothing. This box carries a leftover
-`/usr/local/bin/claude -> /root/.local/bin/claude` from an older install; it is currently
-harmless only because the target no longer exists, which makes it unexecutable and skipped.
-`which -a claude` is the check. `preflight.py` catches a *working* shadow via the version
-warning, but it cannot see a broken one.
+wins and the pin means nothing. The VM carried a leftover
+`/usr/local/bin/claude -> /root/.local/bin/claude` from an older install until
+2026-09-23; it never bit, only because its target had been deleted, which made it
+unexecutable and skipped by `PATH` lookup. `which -a claude` is the check.
+`preflight.py` catches a *working* shadow through the version warning, but a broken one
+is invisible to it.
 
 ## 5. Authentication
 
