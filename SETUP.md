@@ -68,13 +68,23 @@ used the one mechanism the proxy blocks.
 
 ## 3. Binaries that are not packaged
 
-Three live outside apt, and two of them are the ones that went wrong last time.
+Four live outside apt, and two of them are the ones that went wrong last time.
 
 | binary | path on the working box | note |
 |---|---|---|
 | `plink2` | `/usr/local/bin/plink2` | **must be the Linux build and must be `chmod +x`.** Staging a macOS binary here is one of the four known failures |
+| `sandbox-exec` | `/usr/bin/sandbox-exec` | **not optional.** The harness launches every agent as `sandbox-exec -f <profile> <cmd>`, a macOS command; this shim translates the profile into bubblewrap arguments, so the harness never learns which platform it is on. It ships in this repo at `harness/sandbox-exec` and nothing installs it but the line below |
 | `nextflow` | `/usr/local/bin/nextflow` | needs java, which is why openjdk is above |
 | `claude` | `/usr/bin/claude` | via npm, see below |
+
+```bash
+install -m 755 harness/sandbox-exec /usr/bin/sandbox-exec
+```
+
+Until 2026-09-23 this document named `sandbox-exec` only in §6's table of what the public
+repo holds, and never as a thing to install. `setup.sh` installs it; following this
+document by hand did not, and the result is a box where every agent launch fails.
+`preflight.py` checks for it.
 
 `liftOver` and `beagle.jar` live under `build/refdata/bin/` and come with the refdata,
 not with the system. **The `liftOver` in refdata must be the Linux build**, same trap as
