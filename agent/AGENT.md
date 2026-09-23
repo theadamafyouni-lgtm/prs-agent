@@ -25,8 +25,8 @@ neither is the judgment core (`ARCH-4`), which is the contract every skill obeys
 
 **The door is not a stage.** It runs before `select`, because `SEL-5` needs ancestry up front,
 `ANC-1` infers ancestry from the patient's file, and `SEL-11`'s coverage estimate needs the assay
-class to read presence correctly. All three need the file read and classified first (spec §16-H
-records this as a defect that was found and fixed — do not rebuild the old order).
+class to read presence correctly. All three need the file read and classified first (the old order was a
+defect that was found and fixed — do not rebuild it).
 
 `read-and-reason` runs twice: at the door on the patient's file, and inside `select` on each
 scoring model file. Same capability, two inputs.

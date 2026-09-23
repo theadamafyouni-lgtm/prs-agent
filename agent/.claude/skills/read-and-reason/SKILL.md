@@ -17,7 +17,7 @@ wanting one, that is the signal you are about to hardcode interpretation (`ARCH-
 
 ## A. At the door, on the patient's file
 
-Order is fixed (spec §6.5): **hygiene → classify → normalize → restore ALT.**
+Order is fixed: **hygiene → classify → normalize → restore ALT.**
 Classify comes before normalize because a conversion cannot preserve provenance it does not know.
 
 ### A1. Hygiene (`INTAKE-4`)
@@ -38,10 +38,7 @@ Read the output and apply the rule yourself:
   there is nothing to stop on. If they do not, **that** is your stop, and you can say exactly what
   is wrong rather than refusing a container.
 
-  The rule used to be archives-only, on the reasoning that `.zip` is what the vendor ships so
-  refusing raw text cost the person nothing. **That reasoning does not hold**: people upload what
-  they have, and anyone who unzipped once and kept the `.txt` was being refused for no fault of
-  the file. Container is not evidence of corruption. Corruption is.
+  Container is not evidence of corruption. Corruption is.
 
   `normalize.py` reads the container from the file's own magic bytes rather than its extension,
   so a `.txt` that is really a zip is handled correctly and the container it found lands in
@@ -52,7 +49,7 @@ Read the output and apply the rule yourself:
   corruption or modification signal — treat it as grounds to look harder, not as an automatic stop.
 - **Checksum.** The tool computes a SHA-256. Note honestly that no vendor checksum ships with the
   archive, so there is nothing external to verify against; the hash is an audit trail, not a
-  verification. (Logged as OPEN_QUESTIONS Q1.)
+  verification.
 
 ### A2. Classify (`INTAKE-1`)
 
@@ -79,7 +76,7 @@ absence means something different in each — array: unmeasured; WES: outside th
 WGS: depends how it was called; gVCF: resolvable from the file itself. Guessing wrong makes
 absence mean the wrong thing at every stage after this one.
 
-Signals worth weighing (R8a §3, R3 §3). No single one is proof; the conjunction is
+Signals worth weighing. No single one is proof; the conjunction is
 a **heuristic**, and there is no validated, benchmarked classifier for this decision:
 
 - a fixed, sparse marker set (hundreds of thousands of rows, not millions) at non-contiguous positions
@@ -222,8 +219,8 @@ python3 tools/file_facts.py --input <scoring file> --comment-prefix '#' \
   when the published weights do not.
 - Check `#weight_type`. If the model is not an additive weighted sum — dosage-per-genotype,
   recessive, dominant, interaction, diplotype, haplotype — a weighted-sum computation cannot
-  compute it (`SCO-9`). That fork is open at spec level (§17.2); until it closes, surface it and
-  pick an additive model rather than resolving the fork silently.
+  compute it (`SCO-9`). That fork is unresolved; surface it and pick an additive model rather
+  than resolving it silently.
 
 **You** decide the column mapping from what the header actually says, and you pass that mapping
 explicitly to the downstream tools. No tool guesses a column layout.

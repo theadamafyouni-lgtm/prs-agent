@@ -60,7 +60,7 @@ gesturing at it.
 
 Pull from the run, do not invent: the model's development ancestry, its evaluation ancestry and
 the actual reported metrics, the coverage fraction, the assay-match status, and the scoring-parity
-warning if `INT-4` or `R1` fired.
+warning if `INT-4` fired.
 
 ## Delivering a hard result with care (`REP-6`, `REP-7`)
 
@@ -85,7 +85,8 @@ coverage floor, or `interpret` could not build a usable reference, the person is
   includes more people like them);
 - the same clinician handoff if they have a medical question.
 
-**Those same four items also go into `report.json` as `refusal_envelope`, written TO the person.**
+**The first four of those also go into `report.json` as `refusal_envelope`, written TO the
+person.** The clinician handoff has no field: it is delivered in the conversation.
 The window renders the refusal screen from that block directly, so it is the delivery, not a
 record of one. `delivered` describes what you said; `refusal_envelope` *is* what you say. Write it
 in the register you would use speaking to them -- second person, present tense, no `REP-` ids, no

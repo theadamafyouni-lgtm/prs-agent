@@ -303,8 +303,6 @@ def deny_probe_paths(home):
         (p(AGENT, "runs/slice-001/report/report_output_placed.md"), "the finished report"),
         (p(AGENT, "runs/slice-001/truth-cg"), "the Complete Genomics truth arm"),
         (p(AGENT, "runs/" + _PRIVATE["deny_eval_run"]), "a second scenario's full key"),
-        (p(AGENT, "docs/live-record-slice-001.md"), "the most efficient leak in the repo"),
-        (p(AGENT, "docs/prd.md"), "names the patient and asserts an ancestry"),
         (p(AGENT, "BUILD_LOG.md"), "states the ancestry call and the distance"),
         (p(AGENT, "OPEN_QUESTIONS.md"), "Q10 carries the final corrected answer"),
         (p(AGENT, "oracle"), "independent pgsc_calc verification outputs"),

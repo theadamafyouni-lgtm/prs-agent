@@ -17,11 +17,10 @@ Every stage produces exactly one of these, and says which one it produced (`JC-1
 **A correct refusal or a correct clarifying question is a correct outcome, not a failure** (`JC-6`).
 Grading treats it as such. Do not treat a refusal as something to engineer around.
 
-The refuse/stop line is drawn from the idea's worked example and is **not closed** (spec §16-G;
-`R2` bears on it). When an outcome sits near that line, record which one was chosen and why, so
+The refuse/stop line is drawn from the idea's worked example and is **not closed**. When an outcome sits near that line, record which one was chosen and why, so
 the boundary can be revisited with evidence rather than re-argued from scratch.
 
-**A person-initiated stop is not one of the four** (spec §12). At any gate, for any reason, the
+**A person-initiated stop is not one of the four.** At any gate, for any reason, the
 person may end the session. That is the absence of an agent judgment, not one of them. Record it
 as `session-ended-by-person`, never as `refuse` or `stop`.
 

@@ -68,8 +68,7 @@ pool, and a model you never enumerated cannot be ranked below the one you chose.
 
 `SEL-1` applies no model-class filter, so the catalog can hand you a model `score` cannot compute
 — dosage-per-genotype, recessive, dominant, interaction, diplotype, haplotype (`SCO-9`). Whether
-select filters on computability or score defines a refusal is an **open fork** (§17.2). Until it
-closes: check `weight_type` and the scoring file header, prefer an additive weighted sum, and if a
+select filters on computability or score defines a refusal is **unresolved**. Until it is: check `weight_type` and the scoring file header, prefer an additive weighted sum, and if a
 non-additive candidate would otherwise win, **say so rather than silently skipping it**.
 
 ## 3. Weigh on ancestry match and validation quality — never on variant count (`SEL-2`)
@@ -203,7 +202,7 @@ it sees weight sitting on positions missing from the patient's file, but it cann
 imputation actually runs. `resolved_weight_fraction` here is an **upper bound** on what `score` will
 measure. Say "estimate" to the person, not "coverage".
 
-The gate is `SCO-8`'s two conditions, with prd §3's values:
+The gate is `SCO-8`'s two conditions:
 
 1. **Weighted coverage** — refuse if resolved Σ|β| < **0.90**.
 2. **High-β condition** — refuse if any single unresolved locus carries **≥ 5%** of total Σ|β|,

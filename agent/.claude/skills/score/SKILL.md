@@ -206,12 +206,12 @@ Two conditions, and a stop:
 3. **Stop if the data is broken** — including the internal inconsistency in §6.
 
 All three values are **design choices, chosen and defended, not derived** — no published number
-exists (R1, R9). Say that when you use them. And the honest consequence, which is intended: a
+exists. Say that when you use them. And the honest consequence, which is intended: a
 stringent r² bar plus a 0.90 floor means an admixed patient, whose absent high-weight
 positions are also the hardest to impute well, can trip a refusal. That is `FRAME-3`'s honest
 limit made operational, and a correct refusal is a correct outcome.
 
-## 6. Compute (`SCO-9`, prd §2)
+## 6. Compute (`SCO-9`)
 
 ```bash
 python3 tools/score_plink2.py --run <RUN_ID> \
@@ -246,7 +246,7 @@ not mean.
 **Check the model class.** Some catalog models are not weighted sums at all (dosage-per-genotype,
 recessive, dominant, interaction, diplotype, haplotype). A weighted-sum computation cannot compute
 those. `SEL-1` sources with no model-class filter, so the handoff can carry an uncomputable model;
-the fork is open (§17.2), so surface it rather than resolving it silently.
+the fork is unresolved, so surface it rather than resolving it silently.
 
 ## 7. Hand back to select if needed (`SEL-12`)
 
