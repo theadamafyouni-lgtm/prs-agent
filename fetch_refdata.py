@@ -2,8 +2,8 @@
 """Fetch the reference data this harness needs, from the manifest that recorded it.
 
     python3 fetch_refdata.py --plan              # what it would do, downloads nothing
-    python3 fetch_refdata.py                     # selection profile, about 24 GB
-    python3 fetch_refdata.py --profile full      # everything, about 48 GB
+    python3 fetch_refdata.py                     # selection profile, about 4 GB
+    python3 fetch_refdata.py --profile full      # everything, about 10 GB
     python3 fetch_refdata.py --verify            # check what is already here
 
 build/refdata is tens of gigabytes and cannot live in a git repository. It is not
@@ -11,15 +11,22 @@ a black box either: build/refdata/MANIFEST.json records every external artifact
 with its source URL, its size and its sha256, so this reads that file rather than
 carrying a URL list of its own. If the manifest is regenerated, this follows.
 
+THE MANIFEST DESCRIBES ONLY A FIFTH OF build/refdata
+
+Measured 2026-09-23: build/refdata is 49 GB, and all 32 manifest records total
+10.3 GB. The other 38 GB is hgdp_1kgp/ and phase3/ (29 GB, fetched by nothing at
+all -- see SETUP.md section 8) plus the derived PCA output (8.9 GB). Running this
+script to completion does NOT give you a usable build/refdata.
+
 TWO PROFILES, AND WHY THE SMALLER ONE IS THE DEFAULT
 
-    selection   about 24 GB. Everything except the Beagle imputation panel.
-    full        about 48 GB. Adds the 22 per-chromosome panel files.
+    selection   about 4 GB.  10 artifacts. Everything except the Beagle panel.
+    full        about 10 GB. Adds the 22 per-chromosome panel files.
 
 The selection benchmark runs read-and-reason, ancestry and select, and stops
 before scoring. Imputation is a scoring-stage concern, so no case in this
-benchmark ever opens the panel. Downloading 24 GB to leave it untouched is not
-caution, it is just 24 GB. Use --profile full when scoring runs.
+benchmark ever opens the panel. Downloading 6 GB to leave it untouched is not
+caution, it is just 6 GB. Use --profile full when scoring runs.
 
 WHAT THIS DOES NOT DO
 
