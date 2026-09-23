@@ -1,9 +1,14 @@
 # Building the eval VM from a bare box
 
-Ubuntu 24.04 (noble), 8 vCPU / 16 GB / no swap, 160 GB disk. Everything below was read
-off the working machine on 2026-09-05 rather than recalled, **except where it says
-UNVERIFIED** — those steps have never been run on a genuinely empty box and are the
-reason a wipe is not yet safe.
+Ubuntu 24.04 (noble), 8 vCPU / 16 GB, 160 GB disk. Everything below was read off the
+working machine on 2026-09-05 rather than recalled, **except where it says UNVERIFIED**.
+
+> **Read §8 before you plan anything.** On 2026-09-23 this document was audited against
+> the working box, section by section. §8 is not merely unverified — **it is wrong, and
+> `build/refdata` cannot be rebuilt from these two repositories.** About 29 GB of it is
+> fetched by no script anywhere and must be copied from a machine that already has it.
+> Everything else in §1–§9 is now corrected and evidenced; §10 has still never been run
+> on a rebuilt box. Sections carrying an UNVERIFIED marker are the remaining gaps.
 
 The four known failure points from the last attempt: numpy missing, plink2 not
 executable, macOS binaries staged instead of Linux ones, and `setup.sh` / `preflight.py`
@@ -371,11 +376,26 @@ carries `present: true, valid: true, errors: []`.
 
 ## What this document is not
 
-**It has not been executed end to end on an empty machine.** It is a record of a working
-box plus the four failures already known, which is better than nothing and is not the
-same as a tested procedure. Three sections are marked UNVERIFIED and they are the ones
-that will cost the day: the real Python requirements, the port-patch order, and the
-refdata fetch.
+**It has still not been executed end to end on an empty machine.** It was audited against
+the working box on 2026-09-23 — every claim checked against the files, nothing wiped —
+and eight corrections came out of that. An audit is not an execution. Nobody has yet
+cloned these repos onto a bare box and reached a passing §10.
 
-**Do not wipe the working box until this has been run somewhere else**, or there is no
-way back.
+What the audit settled:
+
+- **§2, the real Python requirements.** Answered. `numpy` is required; `scipy` only
+  because preflight demands it; `pandas` and `requests` are needed by nothing.
+- **§8, the refdata fetch.** Answered, and the answer is that it cannot be done.
+  29 GB has no acquisition step in either repository.
+
+What it did not settle, and what is still UNVERIFIED:
+
+- **§7, the port-patch order.** Whether a fresh clone needs the three `patch_*.py`.
+- **§10.** Neither the gate nor a paid run has been executed against a rebuilt machine.
+- **Whether the five plink2 commands in §8 reproduce `prune.prune.in` on Linux.** They
+  have only ever run on macOS, and a rerun that does not reproduce that sha256 is not
+  reproducing the published results.
+
+**Do not wipe the working box.** Not "until this has been run somewhere else" — the
+audit established that `build/refdata` cannot be reconstructed from these repositories
+at all, so a wipe destroys roughly 38 GB with no way back. Close §8's gap first.
