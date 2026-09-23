@@ -79,7 +79,7 @@ import sys
 
 GROUP_RE = re.compile(r"\b(AFR|AMR|CSA|SAS|EAS|EUR|MID|OTH)\b")
 
-# The shapes result.json promises. These mirror build/tools/record.py, which
+# The shapes result.json promises. These mirror agent/tools/record.py, which
 # rejects anything else at write time. Re-checked here because a file being on
 # disk is not evidence that the tool wrote it, and because a grader that repairs
 # its own input is measuring the repair.

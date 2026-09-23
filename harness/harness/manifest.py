@@ -86,7 +86,7 @@ def source_revision():
     """What the agent's source looked like, read by the harness -- never by the agent."""
     def _git(*args):
         try:
-            r = subprocess.run(["git", "-C", config.BUILD] + list(args),
+            r = subprocess.run(["git", "-C", config.AGENT] + list(args),
                                capture_output=True, text=True, timeout=20)
             return (r.stdout or "").strip() or None
         except Exception:  # noqa: BLE001
@@ -94,7 +94,7 @@ def source_revision():
     return {
         "build_head": _git("rev-parse", "HEAD"),
         "build_dirty": bool(_git("status", "--porcelain")),
-        "note": "Read by the harness for provenance. build/.git is never staged and is on "
+        "note": "Read by the harness for provenance. agent/.git is never staged and is on "
                 "the denial probe list -- its commit subject lines alone leak the prior "
                 "run's ancestry call.",
     }

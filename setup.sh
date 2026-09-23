@@ -12,7 +12,7 @@
 #
 # Two things are left for a person, and the demo does not work without them.
 #
-#   The reference data. build/refdata is about 49 GB: the HGDP+1kGP panel, a
+#   The reference data. agent/refdata is about 49 GB: the HGDP+1kGP panel, a
 #   1000 Genomes phase 3 subset, GRCh37 and GRCh38 FASTA, liftOver chains and
 #   recombination maps. It is far past what git will hold, so it is not in this
 #   repository and cannot be.
@@ -38,7 +38,7 @@
 set -u
 CLI_VERSION=2.1.224
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REFDATA="$REPO/build/refdata"
+REFDATA="$REPO/agent/refdata"
 say(){ echo "==> $*"; }
 warn(){ echo "    ! $*"; }
 
@@ -135,7 +135,7 @@ say "reference data"
 if [ -d "$REFDATA/ancestry-ref" ] && [ -d "$REFDATA/panel" ]; then
   say "  present, $(du -sh "$REFDATA" 2>/dev/null | cut -f1)"
 else
-  warn "build/refdata is missing or incomplete. About 49 GB, not in this repo."
+  warn "agent/refdata is missing or incomplete. About 49 GB, not in this repo."
   warn "Copy it from a machine that has it. It cannot be rebuilt here: 29 GB of"
   warn "it (ancestry-ref/hgdp_1kgp, ancestry-ref/phase3) is fetched by no script"
   warn "in either repository. See SETUP.md section 8."

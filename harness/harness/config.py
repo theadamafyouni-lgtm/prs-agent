@@ -22,8 +22,8 @@ import os
 HARNESS_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PRODUCT_ROOT = os.path.dirname(HARNESS_ROOT)
 
-BUILD = os.path.join(PRODUCT_ROOT, "build")
-REFDATA_SRC = os.path.join(BUILD, "refdata")
+AGENT = os.path.join(PRODUCT_ROOT, "agent")
+REFDATA_SRC = os.path.join(AGENT, "refdata")
 PROVIDER_SRC = os.path.join(PRODUCT_ROOT, "reference-provider")
 
 # Harness-private. 0700. No sandbox profile may ever name a path under here.
@@ -37,7 +37,7 @@ SANDBOX_TOOLS = os.path.join(HARNESS_ROOT, "sandbox_tools")
 # ---------------------------------------------------------------------------
 # The thirteen pipeline tools
 #
-# The other eleven files in build/tools/ are analysis and build-time tools that no skill
+# The other eleven files in agent/tools/ are analysis and build-time tools that no skill
 # invokes. They are excluded because they are not needed AND because they are the worst
 # leak in the directory: rerun_coverage_leaveout.sh lists the whole candidate shortlist,
 # leaveout_dr2.sh states the patient's ancestry outright, cg_truth_extract.py hardcodes
@@ -240,7 +240,7 @@ GREP_SKIP_EXT = {
 GREP_MAX_BYTES = 8 * 1024 * 1024
 
 # ---------------------------------------------------------------------------
-# Scrub rules: applied to the staged COPY, never to build/.
+# Scrub rules: applied to the staged COPY, never to agent/.
 #
 # These files are inside the sandbox, so no boundary helps. pgs_catalog.py is the worst of
 # them -- it is the first tool select invokes and its docstring hands over the trait and two
@@ -297,20 +297,20 @@ SCRUB_RUN_ID_REPLACEMENT = "<RUN_ID>"
 def deny_probe_paths(home):
     p = os.path.join
     return [
-        (p(BUILD, "runs/slice-001/ledger.jsonl"), "the prior run's ordered decision history"),
-        (p(BUILD, "runs/slice-001/ancestry/ancestry.json"), "the ancestry call"),
-        (p(BUILD, "runs/slice-001/score/RESOLVED_FRACTIONS.md"), "the coverage table"),
-        (p(BUILD, "runs/slice-001/report/report_output_placed.md"), "the finished report"),
-        (p(BUILD, "runs/slice-001/truth-cg"), "the Complete Genomics truth arm"),
-        (p(BUILD, "runs/" + _PRIVATE["deny_eval_run"]), "a second scenario's full key"),
-        (p(BUILD, "docs/live-record-slice-001.md"), "the most efficient leak in the repo"),
-        (p(BUILD, "docs/prd.md"), "names the patient and asserts an ancestry"),
-        (p(BUILD, "BUILD_LOG.md"), "states the ancestry call and the distance"),
-        (p(BUILD, "OPEN_QUESTIONS.md"), "Q10 carries the final corrected answer"),
-        (p(BUILD, "oracle"), "independent pgsc_calc verification outputs"),
-        (p(BUILD, ".git"), "tracked docs; log subjects alone leak"),
-        (p(BUILD, "sim/personas"), "the persona files"),
-        (p(BUILD, "refdata/ancestry-ref/build"), "deleted from the clone; assert the "
+        (p(AGENT, "runs/slice-001/ledger.jsonl"), "the prior run's ordered decision history"),
+        (p(AGENT, "runs/slice-001/ancestry/ancestry.json"), "the ancestry call"),
+        (p(AGENT, "runs/slice-001/score/RESOLVED_FRACTIONS.md"), "the coverage table"),
+        (p(AGENT, "runs/slice-001/report/report_output_placed.md"), "the finished report"),
+        (p(AGENT, "runs/slice-001/truth-cg"), "the Complete Genomics truth arm"),
+        (p(AGENT, "runs/" + _PRIVATE["deny_eval_run"]), "a second scenario's full key"),
+        (p(AGENT, "docs/live-record-slice-001.md"), "the most efficient leak in the repo"),
+        (p(AGENT, "docs/prd.md"), "names the patient and asserts an ancestry"),
+        (p(AGENT, "BUILD_LOG.md"), "states the ancestry call and the distance"),
+        (p(AGENT, "OPEN_QUESTIONS.md"), "Q10 carries the final corrected answer"),
+        (p(AGENT, "oracle"), "independent pgsc_calc verification outputs"),
+        (p(AGENT, ".git"), "tracked docs; log subjects alone leak"),
+        (p(AGENT, "sim/personas"), "the persona files"),
+        (p(AGENT, "refdata/ancestry-ref/build"), "deleted from the clone; assert the "
                                                  "original is unreachable too"),
         (p(PRODUCT_ROOT, "reference-provider/work/cohort_score.sscore"),
          "the 300 per-sample scores that ARE the distribution"),
@@ -322,7 +322,7 @@ def deny_probe_paths(home):
         (p(PRODUCT_ROOT, "pgp-fixtures"), "four more truth files"),
         (p(PRODUCT_ROOT, "old-git-history"), "bare repo; log subjects leak the ancestry call"),
         (p(PRODUCT_ROOT, "build-inputs-backup-docs/prd.md"),
-         "a second copy of the patient-naming PRD outside build/"),
+         "a second copy of the patient-naming PRD outside agent/"),
         (os.path.expanduser("~/Documents/ProjectVault"), "the Obsidian vault. Absent on "
          "the VM, so this probe returns `absent` rather than `denied` there, which is "
          "reported as its own state and is not a pass"),

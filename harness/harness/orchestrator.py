@@ -554,7 +554,7 @@ def _as_text(v):
 # call. A manifest that trusted it would be reporting the agent's own account of whether
 # it followed the rules. So the harness reads the file and checks it again from outside.
 #
-# These rules mirror build/tools/record.py:validate_result. Change one, change both.
+# These rules mirror agent/tools/record.py:validate_result. Change one, change both.
 # ---------------------------------------------------------------------------
 
 RESULT_FINAL_OUTCOMES = {"score", "refuse", "stop"}
@@ -1010,7 +1010,7 @@ class Orchestrator:
 
     def patient_path(self):
         """The person's file this run was given, resolved identically for every kind of run."""
-        return self.patient_file or os.path.join(config.BUILD, "sample",
+        return self.patient_file or os.path.join(config.AGENT, "sample",
                                                  "patient.array-23andme.zip")
 
     def bare_brief(self):
@@ -1078,19 +1078,19 @@ class Orchestrator:
         tools = os.path.join(root, "tools")
         os.makedirs(tools)
         for name in config.PIPELINE_TOOLS:
-            staging.copy_in(os.path.join(config.BUILD, "tools", name),
+            staging.copy_in(os.path.join(config.AGENT, "tools", name),
                             os.path.join(tools, name), r, "pipeline-tool",
                             scrub_rel="tools/" + name)
         r.notes.append({"kind": "tools_excluded", "detail": config.EXCLUDED_TOOLS_REASON})
 
         for skill in config.SKILLS:
             staging.copy_in(
-                os.path.join(config.BUILD, ".claude", "skills", skill, "SKILL.md"),
+                os.path.join(config.AGENT, ".claude", "skills", skill, "SKILL.md"),
                 os.path.join(root, ".claude", "skills", skill, "SKILL.md"),
                 r, "skill", scrub_rel=".claude/skills/%s/SKILL.md" % skill)
 
         for src_rel, dest_rel in config.STAGED_DOCS:
-            staging.copy_in(os.path.join(config.BUILD, src_rel),
+            staging.copy_in(os.path.join(config.AGENT, src_rel),
                             os.path.join(root, dest_rel), r, "doc",
                             scrub_rel=dest_rel)
 
@@ -1256,7 +1256,7 @@ class Orchestrator:
             staging.copy_in(plink, os.path.join(root, "plink2"), r, "provider-binary",
                             mode=0o555)
         staging.copy_in(
-            os.path.join(config.BUILD, "interfaces", "reference-distribution.md"),
+            os.path.join(config.AGENT, "interfaces", "reference-distribution.md"),
             os.path.join(root, "CONTRACT.md"), r, "provider-contract")
         os.makedirs(os.path.join(root, "tmp"), exist_ok=True)
         staging.build_jail_home(os.path.join(root, ".home"), r)

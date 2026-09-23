@@ -14,7 +14,7 @@ invisible rather than open.
 Consequences worth stating rather than discovering:
 
   Nothing under /root is visible except the sandbox itself. The answer key, the
-  vault, build/runs, the personas and the other sandboxes are not denied by a
+  vault, agent/runs, the personas and the other sandboxes are not denied by a
   rule; there is no rule, because there is no such path inside the namespace.
 
   The ancestor metadata exception the macOS profile needs for the JVM does not

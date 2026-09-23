@@ -8,20 +8,20 @@ answer-side/
 pgp-candidates/
 
 # --- too large for git, fetched by fetch_refdata.py ------------------------
-build/refdata/
-!build/refdata/MANIFEST.json
+agent/refdata/
+!agent/refdata/MANIFEST.json
 reference-provider/inputs/
 reference-provider/*.log
 reference-provider/plink2
-build/runs/
-build/oracle/
-build/results/
-build/work/
-build/sample/
-build/test/
-build/nextflow/
-build/eval-check-*/
-build/*.log
+agent/runs/
+agent/oracle/
+agent/results/
+agent/work/
+agent/sample/
+agent/test/
+agent/nextflow/
+agent/eval-check-*/
+agent/*.log
 
 # --- run output ------------------------------------------------------------
 harness/sandboxes/
@@ -51,9 +51,9 @@ harness/eval12b_*.sh
 # candidate models and which one is expected to fail the coverage floor. That
 # is the answer key written out in prose. The others are the same shape.
 # None of it is needed to run anything.
-build/docs/
-build/OPEN_QUESTIONS.md
-build/BUILD_LOG.md
+agent/docs/
+agent/OPEN_QUESTIONS.md
+agent/BUILD_LOG.md
 
 # --- computed reference distributions, NOT shippable -----------------------
 # reference_distribution.json is a built distribution for atrial fibrillation
@@ -71,30 +71,30 @@ harness/docs/
 # cg_truth_* read a participant's Complete Genomics all-sites file, which is the
 # ground truth the agent is graded against. They are not staged into any sandbox
 # and never have been, but they do not belong in a public repository either.
-build/tools/cg_truth_*.py
+agent/tools/cg_truth_*.py
 
 # rerun_coverage_leaveout.sh names all seven candidate models for one benchmark
 # case in one file, and hardcodes runs/slice-001. A one-off rerun of one
 # analysis, not a tool the agent uses.
-build/tools/rerun_coverage_leaveout.sh
-build/tools/apply_leaveout_dr2.py
-build/tools/leaveout_dr2.sh
-build/tools/loo_validate_ancestry.py
-build/tools/panel_index.py
-build/tools/coverage_breakdown.py
-build/tools/palindromic_fraction.py
+agent/tools/rerun_coverage_leaveout.sh
+agent/tools/apply_leaveout_dr2.py
+agent/tools/leaveout_dr2.sh
+agent/tools/loo_validate_ancestry.py
+agent/tools/panel_index.py
+agent/tools/coverage_breakdown.py
+agent/tools/palindromic_fraction.py
 
 # run results, ~350KB a case. not committed for now.
 results/
 
 # personas live in the private companion repo prs-agent-private
-build/sim/personas/eval/
+agent/sim/personas/eval/
 
 # corpus tooling lives in the private companion repo
 vm/
 
 # answer-side design docs stay in the private companion repo
-build/docs/prd.md
-build/docs/spec.md
-build/docs/idea.md
-build/docs/skill-spec-coverage.md
+agent/docs/prd.md
+agent/docs/spec.md
+agent/docs/idea.md
+agent/docs/skill-spec-coverage.md

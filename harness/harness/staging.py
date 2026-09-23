@@ -15,7 +15,7 @@ The second is that staging is recorded as it happens, file by file, with hashes.
 manifest is not written from a description of what should have been staged; it is written
 from what was.
 
-Nothing here modifies build/ or reference-provider/. Scrubbing operates on the copy.
+Nothing here modifies agent/ or reference-provider/. Scrubbing operates on the copy.
 """
 import hashlib
 import json

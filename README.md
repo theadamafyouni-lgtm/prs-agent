@@ -47,7 +47,7 @@ machine that already has it.
 git clone <this repo> && cd prs-agent
 sudo bash setup.sh                    # packages, sandbox, tool binaries
 python3 fetch_refdata.py              # ~4 GB: the manifest artifacts only
-#                                     # then: copy build/refdata from a machine
+#                                     # then: copy agent/refdata from a machine
 #                                     # that has it -- see SETUP.md §8
 python3 preflight.py                  # says whether the machine is ready
 ```
@@ -82,7 +82,7 @@ document it neatly. Nothing looked broken either time.
 
 ```bash
 python3 harness/run_harness.py run \
-    --persona "$PWD/build/sim/personas/eval/<persona>.json" \
+    --persona "$PWD/agent/sim/personas/eval/<persona>.json" \
     --patient <path/to/genotype-file> \
     --stop-after select
 ```
@@ -136,7 +136,7 @@ That is the contribution in one file. Not the number, the choice and its cost.
 
 ## The benchmark
 
-99 personas at `build/sim/personas/eval/`, built on 12 real Personal Genome
+99 personas at `agent/sim/personas/eval/`, built on 12 real Personal Genome
 Project participants. Each persona's self-reported ancestry is that participant's
 own survey answer, and each named file is an assay that participant actually has.
 Age, sex, trait, family history and conversational manner are written.
@@ -207,7 +207,7 @@ and that is worth saying before anyone compares them.
 ## Repository layout
 
 ```
-build/
+agent/
   AGENT.md, JUDGMENT-CORE.md    what the agent is told
   .claude/skills/               one skill per stage, prose not code
   tools/                        extraction only, no interpretation
@@ -224,7 +224,7 @@ preflight.py, setup.sh          environment
 fetch_refdata.py                the 24 GB of public reference data
 ```
 
-Not in the repository, and cannot be: `build/refdata` (tens of gigabytes, fetched
+Not in the repository, and cannot be: `agent/refdata` (tens of gigabytes, fetched
 by `fetch_refdata.py`), the participants' genotype files, and the answer key.
 
 ---

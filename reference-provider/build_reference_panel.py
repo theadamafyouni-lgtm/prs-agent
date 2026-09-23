@@ -27,7 +27,7 @@ Usage:
   python3 build_reference_panel.py \\
     --scoring inputs/PGS005168_hmPOS_GRCh37.txt.gz \\
     --chr-col hm_chr --pos-col hm_pos \\
-    --phase3-dir ../build/refdata/ancestry-ref/phase3 \\
+    --phase3-dir ../agent/refdata/ancestry-ref/phase3 \\
     --chromosomes 1-22 \\
     --out inputs/ref_1kg_PGS005168.vcf.gz
 """

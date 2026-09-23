@@ -356,7 +356,7 @@ def _parse_envelope(text):
 
 def persona_path(name):
     """Resolve a persona by id or filename."""
-    d = os.path.join(config.BUILD, "sim", "personas")
+    d = os.path.join(config.AGENT, "sim", "personas")
     if os.path.isabs(name) and os.path.exists(name):
         return name
     for cand in (name, name + ".json"):

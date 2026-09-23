@@ -49,7 +49,7 @@ import subprocess
 import sys
 
 REPO = os.path.dirname(os.path.abspath(__file__))
-REFDATA = os.path.join(REPO, "build", "refdata")
+REFDATA = os.path.join(REPO, "agent", "refdata")
 
 FAIL, WARN, OK = "FAIL", "WARN", "ok"
 results = []
@@ -137,7 +137,7 @@ def check_refdata_binaries():
 def check_refdata_trees():
     need = {"ancestry-ref": 30, "panel": 5, "fasta": 0.5, "chains": 0, "maps": 0}
     if not os.path.isdir(REFDATA):
-        note(FAIL, "build/refdata missing",
+        note(FAIL, "agent/refdata missing",
              "about 49 GB of reference data. It is not in the repository and "
              "cannot be: it is far larger than git will take.",
              "copy it from a machine that has it. It cannot be rebuilt here: "
@@ -338,14 +338,14 @@ def check_private_restore():
             note(FAIL, "launch-gate tokens rejected by config.py", last,
                  "restore the file again from the private repo")
 
-    pdir = os.path.join(REPO, "build", "sim", "personas", "eval")
+    pdir = os.path.join(REPO, "agent", "sim", "personas", "eval")
     n = (len([f for f in os.listdir(pdir) if f.startswith("p") and f.endswith(".json")])
          if os.path.isdir(pdir) else 0)
     if n == 99:
-        note(OK, "personas", "99 in build/sim/personas/eval")
+        note(OK, "personas", "99 in agent/sim/personas/eval")
     else:
         note(FAIL, "personas", "%d found, expected 99" % n,
-             "cp <prs-agent-private>/personas/* build/sim/personas/eval/")
+             "cp <prs-agent-private>/personas/* agent/sim/personas/eval/")
 
     key = os.path.join(REPO, "answer-side", "answer-sets.csv")
     if os.path.isfile(key):

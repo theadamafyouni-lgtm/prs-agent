@@ -6,17 +6,17 @@
     python3 fetch_refdata.py --profile full      # everything, about 10 GB
     python3 fetch_refdata.py --verify            # check what is already here
 
-build/refdata is tens of gigabytes and cannot live in a git repository. It is not
-a black box either: build/refdata/MANIFEST.json records every external artifact
+agent/refdata is tens of gigabytes and cannot live in a git repository. It is not
+a black box either: agent/refdata/MANIFEST.json records every external artifact
 with its source URL, its size and its sha256, so this reads that file rather than
 carrying a URL list of its own. If the manifest is regenerated, this follows.
 
-THE MANIFEST DESCRIBES ONLY A FIFTH OF build/refdata
+THE MANIFEST DESCRIBES ONLY A FIFTH OF agent/refdata
 
-Measured 2026-09-23: build/refdata is 49 GB, and all 32 manifest records total
+Measured 2026-09-23: agent/refdata is 49 GB, and all 32 manifest records total
 10.3 GB. The other 38 GB is hgdp_1kgp/ and phase3/ (29 GB, fetched by nothing at
 all -- see SETUP.md section 8) plus the derived PCA output (8.9 GB). Running this
-script to completion does NOT give you a usable build/refdata.
+script to completion does NOT give you a usable agent/refdata.
 
 TWO PROFILES, AND WHY THE SMALLER ONE IS THE DEFAULT
 
@@ -60,8 +60,8 @@ import sys
 import urllib.request
 
 REPO = os.path.dirname(os.path.abspath(__file__))
-BUILD = os.path.join(REPO, "build")
-MANIFEST = os.path.join(BUILD, "refdata", "MANIFEST.json")
+AGENT = os.path.join(REPO, "agent")
+MANIFEST = os.path.join(AGENT, "refdata", "MANIFEST.json")
 
 # The Beagle imputation panel: one file per autosome. Not touched by any case in
 # the selection benchmark, which stops before scoring.
@@ -99,8 +99,8 @@ def wanted(artifacts, profile):
 
 
 def dest_of(a):
-    # manifest paths are relative to build/
-    return os.path.join(BUILD, a["path"])
+    # manifest paths are relative to agent/
+    return os.path.join(AGENT, a["path"])
 
 
 def sha256_of(path, cap_mb=None):

@@ -7,7 +7,7 @@ Four participants. The PRS agent runs the pipeline. The persona agent plays the 
 provider agent builds the INT-1 reference when one is asked for. The orchestrator routes
 messages between them, enforces the boundaries, and records everything.
 
-Nothing under `../build/` or `../reference-provider/` is modified. Staging copies, and
+Nothing under `../agent/` or `../reference-provider/` is modified. Staging copies, and
 scrubbing operates on the copy.
 
 ## Running it
@@ -55,7 +55,7 @@ Two things to know before you grade a stop-after-`select` run:
   choice. That is a coherent thing to grade — it is not the same thing as the model the full
   pipeline would have ended on.
 - The stage names are the ledger's and the window's (`door ancestry select score interpret
-  report`), not the skill directory names in `build/.claude/skills/` — the door's skill is
+  report`), not the skill directory names in `agent/.claude/skills/` — the door's skill is
   called `read-and-reason`.
 
 ### Bare runs (`--bare`)

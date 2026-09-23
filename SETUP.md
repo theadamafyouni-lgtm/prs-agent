@@ -5,7 +5,7 @@ working machine on 2026-09-05 rather than recalled, **except where it says UNVER
 
 > **Read §8 before you plan anything.** On 2026-09-23 this document was audited against
 > the working box, section by section. §8 is not merely unverified — **it is wrong, and
-> `build/refdata` cannot be rebuilt from these two repositories.** About 29 GB of it is
+> `agent/refdata` cannot be rebuilt from these two repositories.** About 29 GB of it is
 > fetched by no script anywhere and must be copied from a machine that already has it.
 > Everything else in §1–§9 is now corrected and evidenced; §10 has still never been run
 > on a rebuilt box. Sections carrying an UNVERIFIED marker are the remaining gaps.
@@ -61,7 +61,7 @@ UNVERIFIED note, which asked for exactly this list:
 
 | package | needed by | status |
 |---|---|---|
-| `numpy` | `build/tools/ancestry.py`, `build/tools/loo_validate_ancestry.py`, `reference-provider/build_reference.py` | **required.** Its absence is the failure that produced four worthless FAIL grades |
+| `numpy` | `agent/tools/ancestry.py`, `agent/tools/loo_validate_ancestry.py`, `reference-provider/build_reference.py` | **required.** Its absence is the failure that produced four worthless FAIL grades |
 | `scipy` | nothing imports it | **install it anyway.** `preflight.py` treats its absence as FAIL and will refuse the machine. Either install it or fix preflight; do not skip it silently |
 | `pandas` | nothing imports it | **not required.** Harmless if present |
 | `openpyxl` | `archive_results.py`, `audit/audit_pass1.py` (private repo) | **optional.** Both guard the import and fall back to JSON. Not in the §1 list; add it only if you want the spreadsheet output |
@@ -92,14 +92,14 @@ document by hand did not, and the result is a box where every agent launch fails
 `preflight.py` checks for it.
 
 **nextflow may be vestigial.** `git grep -l nextflow` over the tracked tree matches four
-files — `.gitignore`, this document, `build/.gitignore` and
-`build/docs/research-R9-missing-weight-fraction.md` — and none of them is code.
-`grep -rn nextflow harness/ build/tools/` returns nothing. The `build/.nextflow.log*`
+files — `.gitignore`, this document, `agent/.gitignore` and
+`agent/docs/research-R9-missing-weight-fraction.md` — and none of them is code.
+`grep -rn nextflow harness/ agent/tools/` returns nothing. The `agent/.nextflow.log*`
 files on the working box are dated 2026-07-28, before the current harness. It is installed
 here and kept in the list because **a box without it has not been tested**, not because
 anything is known to need it.
 
-`liftOver` and `beagle.jar` live under `build/refdata/bin/` and come with the refdata,
+`liftOver` and `beagle.jar` live under `agent/refdata/bin/` and come with the refdata,
 not with the system. **The `liftOver` in refdata must be the Linux build**, same trap as
 plink2.
 
@@ -181,8 +181,8 @@ V=/root/prs-agent-private
 install -d -m 700 ~/.config/prs-harness
 install -m 600 "$V/gate/tokens.json" ~/.config/prs-harness/tokens.json
 
-mkdir -p "$P/build/sim/personas/eval" "$P/answer-side" "$P/vm"
-cp "$V"/personas/*                 "$P/build/sim/personas/eval/"
+mkdir -p "$P/agent/sim/personas/eval" "$P/answer-side" "$P/vm"
+cp "$V"/personas/*                 "$P/agent/sim/personas/eval/"
 cp "$V/answer-key/answer-sets.csv" "$P/answer-side/"
 cp "$V"/batch-scripts/*.sh         "$P/harness/"
 cp "$V"/vm/*.py                    "$P/vm/"
@@ -216,20 +216,20 @@ staging, look here first. Read each before running it.
 
 ## 8. Reference data, about 49 GB
 
-> **This section is not a procedure, and you cannot rebuild `build/refdata` from these
+> **This section is not a procedure, and you cannot rebuild `agent/refdata` from these
 > two repositories.** Roughly 29 GB of it is fetched by nothing, anywhere. Tested
 > 2026-09-23 against the working box; what follows says which parts work and which do
 > not, so nobody else spends a day finding out. Do not wipe a machine that has this data
 > until the gap below is closed.
 
-`build/refdata` measures **49 GB** on the working box, in three tiers with three different
+`agent/refdata` measures **49 GB** on the working box, in three tiers with three different
 origins. Only the first can be obtained by running something in this repository.
 
 | tier | size | where it comes from |
 |---|---|---|
-| manifest artifacts | 10.3 GB recorded (32 records); the default `selection` profile fetches 10 of them, **4.0 GB** | `build/tools/stage_refdata.sh`, then `fetch_refdata.py`. **Works.** |
+| manifest artifacts | 10.3 GB recorded (32 records); the default `selection` profile fetches 10 of them, **4.0 GB** | `agent/tools/stage_refdata.sh`, then `fetch_refdata.py`. **Works.** |
 | `ancestry-ref/hgdp_1kgp/` (14 GB) + `ancestry-ref/phase3/` (15 GB) | **29 GB** | **nothing.** No script, no manifest entry, no URL in either repository. This is the gap |
-| `ancestry-ref/hgdp_basis/` (8.6 GB) + `build/` + `build_p3chr1/` | 8.9 GB | derived from `hgdp_1kgp/` by five plink2 commands that existed only as text inside a log file. Now recorded — see step 4 |
+| `ancestry-ref/hgdp_basis/` (8.6 GB) + `ancestry-ref/build/` + `ancestry-ref/build_p3chr1/` | 8.9 GB | derived from `hgdp_1kgp/` by five plink2 commands that existed only as text inside a log file. Now recorded — see step 4 |
 
 ### The parts that work
 
@@ -237,8 +237,8 @@ origins. Only the first can be obtained by running something in this repository.
 # 1. The manifest is NOT in this repository. It lives in the private repo, because
 #    until 2026-09-23 the only copy on earth was inside the directory a wipe deletes.
 #    fetch_refdata.py exits immediately without it.
-mkdir -p build/refdata
-cp /root/prs-agent-private/refdata-recipe/MANIFEST.json build/refdata/MANIFEST.json
+mkdir -p agent/refdata
+cp /root/prs-agent-private/refdata-recipe/MANIFEST.json agent/refdata/MANIFEST.json
 
 # 2. Fetch the 10 selection-profile artifacts (~4.0 GB), or --profile full for all 32
 #    (~10.3 GB, adding the 22 per-chromosome imputation panel files). No case in the
@@ -260,8 +260,8 @@ box. Those two are expected. `fasta` and `maps` MISSING are not.
 ### The part that does not work, and has no workaround
 
 ```
-build/refdata/ancestry-ref/hgdp_1kgp/    14 GB   GRCh37_HGDP+1kGP_ALL.{pgen,pvar.zst,psam}
-build/refdata/ancestry-ref/phase3/       15 GB   chr1-22 .vcf.gz + .tbi
+agent/refdata/ancestry-ref/hgdp_1kgp/    14 GB   GRCh37_HGDP+1kGP_ALL.{pgen,pvar.zst,psam}
+agent/refdata/ancestry-ref/phase3/       15 GB   chr1-22 .vcf.gz + .tbi
 ```
 
 **Neither is in `MANIFEST.json`. Neither is fetched by `fetch_refdata.py`, by
@@ -270,7 +270,7 @@ either anywhere in the tracked tree.** `reference-provider/build_reference_panel
 takes `phase3/` as a required input (`--phase3-dir`); nothing produces it.
 
 Today the only way to get these 29 GB is to copy them from a machine that already has
-them. **Somebody has to write this acquisition step.** Until then `build/refdata` cannot
+them. **Somebody has to write this acquisition step.** Until then `agent/refdata` cannot
 be reconstructed, and neither can anything downstream of it.
 
 ### Building the PCA basis, once `hgdp_1kgp/` exists
@@ -281,12 +281,12 @@ and no reference to `hgdp_basis`. Earlier versions of this section named it here
 wrong.
 
 The basis was built by five plink2 commands run by hand on macOS on 2026-08-12. They were
-recorded only inside `build/refdata/ancestry-ref/hgdp_basis/plink.log` — that is, only
+recorded only inside `agent/refdata/ancestry-ref/hgdp_basis/plink.log` — that is, only
 inside the directory a wipe deletes. Those logs are now in the private repo at
 `prs-agent-private/refdata-recipe/`, and the chain is:
 
 ```bash
-B=build/refdata/ancestry-ref
+B=agent/refdata/ancestry-ref
 plink2 --pfile $B/hgdp_1kgp/GRCh37_HGDP+1kGP_ALL vzs --autosome --snps-only just-acgt \
        --max-alleles 2 --set-all-var-ids @:# --rm-dup exclude-all --maf 0.05 --geno 0.02 \
        --make-pgen --out $B/hgdp_basis/ref_raw
@@ -316,18 +316,18 @@ and into moving the 29 GB, not into the PCA.
 
 ### What has to end up present
 
-- `build/refdata/ancestry-ref/hgdp_1kgp/` — the HGDP+1kGP panel, the projection basis.
+- `agent/refdata/ancestry-ref/hgdp_1kgp/` — the HGDP+1kGP panel, the projection basis.
   **No fetch step exists**
-- `build/refdata/ancestry-ref/phase3/` — 1000G phase3 b37 VCFs, chr1–22.
+- `agent/refdata/ancestry-ref/phase3/` — 1000G phase3 b37 VCFs, chr1–22.
   **No fetch step exists**
-- `build/refdata/ancestry-ref/hgdp_basis/prune.prune.in` — 230,243 pruned markers,
+- `agent/refdata/ancestry-ref/hgdp_basis/prune.prune.in` — 230,243 pruned markers,
   sha256 `64a05450cb77fb3e974c8b16312d0a7f3d0639794e7ffb6807600f30b61f039e`
-- `build/refdata/panel/` — the imputation panel, bref3 per chromosome. **Only fetched by
+- `agent/refdata/panel/` — the imputation panel, bref3 per chromosome. **Only fetched by
   `--profile full`**; the selection benchmark never opens it
-- `build/refdata/fasta/GRCh37.fa.gz` — 751 MB bgzipped, plus `.fai` and `.gzi`
-- `build/refdata/maps/` — genetic maps
-- `build/refdata/bin/` — `plink2`, `liftOver`, `beagle.jar`, `bref3.jar`, `unbref3.jar`
-- `build/refdata/jre/` — the bundled JRE. **Not in `bin/`**, as this section used to say.
+- `agent/refdata/fasta/GRCh37.fa.gz` — 751 MB bgzipped, plus `.fai` and `.gzi`
+- `agent/refdata/maps/` — genetic maps
+- `agent/refdata/bin/` — `plink2`, `liftOver`, `beagle.jar`, `bref3.jar`, `unbref3.jar`
+- `agent/refdata/jre/` — the bundled JRE. **Not in `bin/`**, as this section used to say.
   On the working box every file in `jre/bin/` is mode 644, `java` included;
   `setup.sh`'s `chmod 755` covers `refdata/bin/*` only. Nothing currently uses it —
   `preflight.py` checks `/usr/bin/java` — but it is the plink2 mode-644 trap, unfixed
@@ -335,7 +335,7 @@ and into moving the 29 GB, not into the PCA.
 ## 9. Fixtures and personas
 
 Personas come from the private repo, restored by section 6 to
-`build/sim/personas/eval/`, 99 of them.
+`agent/sim/personas/eval/`, 99 of them.
 
 The ten damaged fixtures are **built, not downloaded**: `make_broken_fixtures.py`
 (private repo, `vm-scripts/`, restored to `/root`)
@@ -397,5 +397,5 @@ What it did not settle, and what is still UNVERIFIED:
   reproducing the published results.
 
 **Do not wipe the working box.** Not "until this has been run somewhere else" — the
-audit established that `build/refdata` cannot be reconstructed from these repositories
+audit established that `agent/refdata` cannot be reconstructed from these repositories
 at all, so a wipe destroys roughly 38 GB with no way back. Close §8's gap first.

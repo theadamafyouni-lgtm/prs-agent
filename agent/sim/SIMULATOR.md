@@ -1,6 +1,6 @@
 # Patient simulator (test agent — NOT part of the product)
 
-**Personas:** `build/sim/personas/eval/`, one JSON per case, named `<case_id>.json`.
+**Personas:** `agent/sim/personas/eval/`, one JSON per case, named `<case_id>.json`.
 
 `ARCH-6`: this is a **separate agent** from the product agent. It lives outside
 `.claude/skills/` on purpose, because `ARCH-3` enumerates exactly six product skills and this is
