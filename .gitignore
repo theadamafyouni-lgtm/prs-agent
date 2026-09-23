@@ -92,3 +92,9 @@ build/sim/personas/eval/
 
 # corpus tooling lives in the private companion repo
 vm/
+
+# answer-side design docs stay in the private companion repo
+build/docs/prd.md
+build/docs/spec.md
+build/docs/idea.md
+build/docs/skill-spec-coverage.md
