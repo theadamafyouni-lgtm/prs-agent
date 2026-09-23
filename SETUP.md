@@ -47,15 +47,24 @@ the macOS seatbelt, and `harness/harness/profile.py` generates its profile.
 System python 3.12.3, packages installed system-wide rather than in a venv on the
 working box.
 
-```bash
-pip3 install --break-system-packages numpy pandas openpyxl requests
-```
+Installed by apt in §1, **not by pip**. The harness runs behind an allow-list proxy that
+returns 403 for PyPI, so `pip install` cannot reach anything from inside a run. `setup.sh`
+and `preflight.py` both say so at their install sites.
 
-**UNVERIFIED which packages are actually required.** The working box carries a large
-inherited set, most of it from cloud-init and unrelated to this project. `numpy` is
-named because its absence broke the last attempt. **Before the wipe, get the real list**
-— run the harness with a minimal environment and add what it asks for, rather than
-copying `pip3 list` wholesale.
+VERIFIED 2026-09-23 by import-grep over both repositories. This replaces the earlier
+UNVERIFIED note, which asked for exactly this list:
+
+| package | needed by | status |
+|---|---|---|
+| `numpy` | `build/tools/ancestry.py`, `build/tools/loo_validate_ancestry.py`, `reference-provider/build_reference.py` | **required.** Its absence is the failure that produced four worthless FAIL grades |
+| `scipy` | nothing imports it | **install it anyway.** `preflight.py` treats its absence as FAIL and will refuse the machine. Either install it or fix preflight; do not skip it silently |
+| `pandas` | nothing imports it | **not required.** Harmless if present |
+| `openpyxl` | `archive_results.py`, `audit/audit_pass1.py` (private repo) | **optional.** Both guard the import and fall back to JSON. Not in the §1 list; add it only if you want the spreadsheet output |
+| `requests` | nothing, anywhere in either repository | **not required.** It was in the old list by mistake |
+
+The previous wording here told you to `pip3 install numpy pandas openpyxl requests`. That
+installed two packages nothing imports, omitted the one package preflight fails on, and
+used the one mechanism the proxy blocks.
 
 ## 3. Binaries that are not packaged
 
