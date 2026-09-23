@@ -74,7 +74,7 @@ Four live outside apt, and two of them are the ones that went wrong last time.
 |---|---|---|
 | `plink2` | `/usr/local/bin/plink2` | **must be the Linux build and must be `chmod +x`.** Staging a macOS binary here is one of the four known failures |
 | `sandbox-exec` | `/usr/bin/sandbox-exec` | **not optional.** The harness launches every agent as `sandbox-exec -f <profile> <cmd>`, a macOS command; this shim translates the profile into bubblewrap arguments, so the harness never learns which platform it is on. It ships in this repo at `harness/sandbox-exec` and nothing installs it but the line below |
-| `nextflow` | `/usr/local/bin/nextflow` | needs java, which is why openjdk is above |
+| `nextflow` | `/usr/local/bin/nextflow` | needs java, which is why openjdk is above. **UNVERIFIED whether anything still uses it** — see below |
 | `claude` | `/usr/bin/claude` | via npm, see below |
 
 ```bash
@@ -85,6 +85,14 @@ Until 2026-09-23 this document named `sandbox-exec` only in §6's table of what 
 repo holds, and never as a thing to install. `setup.sh` installs it; following this
 document by hand did not, and the result is a box where every agent launch fails.
 `preflight.py` checks for it.
+
+**nextflow may be vestigial.** `git grep -l nextflow` over the tracked tree matches four
+files — `.gitignore`, this document, `build/.gitignore` and
+`build/docs/research-R9-missing-weight-fraction.md` — and none of them is code.
+`grep -rn nextflow harness/ build/tools/` returns nothing. The `build/.nextflow.log*`
+files on the working box are dated 2026-07-28, before the current harness. It is installed
+here and kept in the list because **a box without it has not been tested**, not because
+anything is known to need it.
 
 `liftOver` and `beagle.jar` live under `build/refdata/bin/` and come with the refdata,
 not with the system. **The `liftOver` in refdata must be the Linux build**, same trap as
