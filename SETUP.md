@@ -14,8 +14,19 @@ executable, macOS binaries staged instead of Linux ones, and `setup.sh` / `prefl
 ```bash
 apt update
 apt install -y build-essential bcftools bubblewrap openjdk-17-jre-headless \
-               python3-pip python3-venv git curl unzip
+               python3-numpy python3-scipy python3-pandas \
+               git curl unzip zip tmux
 ```
+
+The Python packages come from apt, not pip — see §2 for why. `zip` is used when repacking
+staged artifacts; `tmux` because both the refdata fetch and a 40-minute run outlive an SSH
+session.
+
+`setup.sh` in this repo installs the same set idempotently and is the supported path.
+**It differs from the list above in one respect**: it installs `default-jre`, which on
+noble resolves to `openjdk-21-jre` and is not headless. The working box runs
+`openjdk-17-jre-headless`, which is what the table below records, so this document keeps
+17. The two should be reconciled; until they are, prefer the list above on a headless box.
 
 Confirmed present on the working box at these versions:
 
@@ -24,7 +35,7 @@ Confirmed present on the working box at these versions:
 | bcftools | 1.19-1build2 |
 | bubblewrap | 0.9.0-1ubuntu0.1 |
 | build-essential | 12.10ubuntu1 |
-| openjdk-17-jre-headless | 17.0.20+8-1~24.04 |
+| openjdk-17-jre-headless | 17.0.20.1+1~24.04 |
 
 `tabix` and `bgzip` come with bcftools; both are at `/usr/bin`.
 
