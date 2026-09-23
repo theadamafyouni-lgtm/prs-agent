@@ -212,16 +212,27 @@ def check_sandbox_works():
 
     # Not being root inside matters: Claude Code refuses to skip its permission
     # prompts under root, and an unattended run cannot answer a prompt.
-    rc, out = run(["bwrap", "--ro-bind", "/usr", "/usr", "--ro-bind", "/etc", "/etc",
-                   "--ro-bind", os.path.realpath("/usr/lib"), "/lib",
-                   "--proc", "/proc", "--dev", "/dev", "--unshare-user",
-                   "--uid", "1000", "--unshare-pid", "--die-with-parent", "--",
-                   sys.executable, "-c", "import os;print(os.getuid())"], timeout=40)
+    # /lib64 must be bound too, or the ELF interpreter (/lib64/ld-linux-x86-64.so.2)
+    # is absent and the interpreter cannot start at all. Without it this test failed
+    # with "execvp /usr/bin/python3: No such file or directory" on every x86_64 box
+    # and reported a uid-mapping problem that did not exist -- while the fuller test
+    # above, which does bind /lib64, passed. A check that cries wolf is worse than no
+    # check: this one was known-noisy and therefore ignored.
+    args = ["bwrap", "--ro-bind", "/usr", "/usr", "--ro-bind", "/etc", "/etc",
+            "--ro-bind", os.path.realpath("/usr/lib"), "/lib"]
+    if os.path.isdir(os.path.realpath("/usr/lib64")):
+        args += ["--ro-bind", os.path.realpath("/usr/lib64"), "/lib64"]
+    args += ["--proc", "/proc", "--dev", "/dev", "--unshare-user",
+             "--uid", "1000", "--unshare-pid", "--die-with-parent", "--",
+             sys.executable, "-c", "import os;print(os.getuid())"]
+    rc, out = run(args, timeout=40)
     if rc == 0 and out.strip() == "1000":
         note(OK, "sandbox: uid mapped to 1000", "not root inside the namespace")
     else:
         note(WARN, "sandbox: uid mapping did not take", out.strip()[:120],
-             "Claude Code refuses --dangerously-skip-permissions as root")
+             "the namespace ran as root. Claude Code refuses "
+             "--dangerously-skip-permissions as root, so an unattended run cannot "
+             "answer the prompt it then raises")
 
 
 def check_cli():
