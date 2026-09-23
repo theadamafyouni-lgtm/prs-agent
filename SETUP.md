@@ -104,11 +104,20 @@ plink2.
 apt install -y nodejs npm
 npm install -g @anthropic-ai/claude-code@2.1.224
 claude --version    # must print 2.1.224
+which -a claude     # must be ONE entry, and it must be the npm one
 ```
 
 **Pin the version and pin it after any sign-in.** Newer versions cannot open their
 scratch directory inside the sandbox, so every case dies in under a second with what
 reads like a permissions error. This is the single most expensive thing to get wrong.
+
+**The pin is only as good as your `PATH`.** npm installs to `/usr/bin/claude`, and
+`/usr/local/bin` comes before `/usr/bin` on Ubuntu — so a second `claude` there silently
+wins and the pin means nothing. This box carries a leftover
+`/usr/local/bin/claude -> /root/.local/bin/claude` from an older install; it is currently
+harmless only because the target no longer exists, which makes it unexecutable and skipped.
+`which -a claude` is the check. `preflight.py` catches a *working* shadow via the version
+warning, but it cannot see a broken one.
 
 ## 5. Authentication
 
