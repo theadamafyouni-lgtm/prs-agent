@@ -202,7 +202,7 @@ staging, look here first. Read each before running it.
 ## 8. Reference data, about 24 GB
 
 ```bash
-python3 build/fetch_refdata.py      # pulls from MANIFEST.json
+python3 fetch_refdata.py            # pulls from build/refdata/MANIFEST.json
 python3 reference-provider/build_reference.py
 ```
 
