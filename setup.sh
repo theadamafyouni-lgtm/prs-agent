@@ -12,13 +12,18 @@
 #
 # Two things are left for a person, and the demo does not work without them.
 #
-#   The reference data. build/refdata is about 48 GB: the HGDP+1kGP panel, a
+#   The reference data. build/refdata is about 49 GB: the HGDP+1kGP panel, a
 #   1000 Genomes phase 3 subset, GRCh37 and GRCh38 FASTA, liftOver chains and
 #   recombination maps. It is far past what git will hold, so it is not in this
-#   repository and cannot be. Either build it with
-#   reference-provider/build_reference.py, which takes hours and a lot of
-#   bandwidth, or copy it from a machine that has it. refdata/MANIFEST.json
-#   records what should be there.
+#   repository and cannot be.
+#
+#   COPY IT FROM A MACHINE THAT HAS IT. That is not a preference, it is the only
+#   way. Verified 2026-09-23: about 29 GB of it -- ancestry-ref/hgdp_1kgp/ and
+#   ancestry-ref/phase3/ -- is fetched by no script in either repository and has
+#   no URL anywhere in the tracked tree. fetch_refdata.py gets 4 GB of the 49.
+#   Earlier text here said to build it with reference-provider/build_reference.py;
+#   that script builds a per-patient INT-1 distribution and has no network code.
+#   See SETUP.md section 8.
 #
 #   Signing in to Claude Code. It is interactive and cannot be scripted. Note the
 #   order, because it is not the obvious one: sign in FIRST, then pin the CLI
@@ -130,9 +135,10 @@ say "reference data"
 if [ -d "$REFDATA/ancestry-ref" ] && [ -d "$REFDATA/panel" ]; then
   say "  present, $(du -sh "$REFDATA" 2>/dev/null | cut -f1)"
 else
-  warn "build/refdata is missing or incomplete. About 48 GB, not in this repo."
-  warn "Build it with reference-provider/build_reference.py, or copy it from a"
-  warn "machine that has it. See build/refdata/MANIFEST.json."
+  warn "build/refdata is missing or incomplete. About 49 GB, not in this repo."
+  warn "Copy it from a machine that has it. It cannot be rebuilt here: 29 GB of"
+  warn "it (ancestry-ref/hgdp_1kgp, ancestry-ref/phase3) is fetched by no script"
+  warn "in either repository. See SETUP.md section 8."
 fi
 
 echo

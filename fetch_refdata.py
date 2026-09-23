@@ -32,9 +32,19 @@ WHAT THIS DOES NOT DO
 
 It downloads. It does not build. Three of the largest directories under
 ancestry-ref are derived rather than fetched: hgdp_basis, build and build_p3chr1
-are PCA output, produced by reference-provider/build_reference.py from the files
-this script gets. So the order is fetch, then build, and the build is the slow
-half.
+are PCA output.
+
+Two corrections to what this docstring used to say, both verified 2026-09-23.
+
+They are NOT produced by reference-provider/build_reference.py. That script
+builds a per-patient INT-1 reference distribution, takes six required arguments,
+and contains no network code and no reference to hgdp_basis. The PCA basis comes
+from five plink2 commands, reproduced in SETUP.md section 8 and recorded in
+prs-agent-private/refdata-recipe/plink.log.
+
+They are NOT derived "from the files this script gets" either. Their input is
+ancestry-ref/hgdp_1kgp/, 14 GB that is in no manifest and that nothing in either
+repository fetches. Run this script to completion and that input is still absent.
 
 The macOS JRE is the one artifact whose URL is platform-specific
 (api.adoptium.net/.../mac/aarch64/...). On Linux it is fetched from the linux/x64
