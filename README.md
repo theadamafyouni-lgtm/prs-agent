@@ -38,15 +38,25 @@ The macOS path exists but is not in this repository yet. See
 
 ## Setup
 
-Four steps, and two of them are slow.
+Four steps, and **one of them cannot be completed from this repository.** Read
+`SETUP.md` §8 before starting; the short version is that about 29 GB of the
+reference data is fetched by no script anywhere and has to be copied from a
+machine that already has it.
 
 ```bash
 git clone <this repo> && cd prs-agent
 sudo bash setup.sh                    # packages, sandbox, tool binaries
-python3 fetch_refdata.py              # about 24 GB of public reference data
-python3 reference-provider/build_reference.py   # builds the PCA basis, slow
+python3 fetch_refdata.py              # ~4 GB: the manifest artifacts only
+#                                     # then: copy build/refdata from a machine
+#                                     # that has it -- see SETUP.md §8
 python3 preflight.py                  # says whether the machine is ready
 ```
+
+`reference-provider/build_reference.py` used to appear here as the step that
+"builds the PCA basis". It does not: it builds a per-patient INT-1 reference
+distribution and takes six required arguments. The PCA basis comes from five
+plink2 commands recorded in the private repo under `refdata-recipe/`, and their
+14 GB input is part of the 29 GB above.
 
 Then sign in, **in this order**:
 

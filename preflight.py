@@ -138,10 +138,12 @@ def check_refdata_trees():
     need = {"ancestry-ref": 30, "panel": 5, "fasta": 0.5, "chains": 0, "maps": 0}
     if not os.path.isdir(REFDATA):
         note(FAIL, "build/refdata missing",
-             "about 48 GB of reference data. It is not in the repository and "
+             "about 49 GB of reference data. It is not in the repository and "
              "cannot be: it is far larger than git will take.",
-             "build it with reference-provider/build_reference.py, or copy it from "
-             "a machine that has it. See refdata/MANIFEST.json for what it holds.")
+             "copy it from a machine that has it. It cannot be rebuilt here: "
+             "fetch_refdata.py gets 4 GB of the 49, and 29 GB (ancestry-ref/"
+             "hgdp_1kgp, ancestry-ref/phase3) is fetched by no script in either "
+             "repository. See SETUP.md section 8.")
         return
     for name, min_gb in need.items():
         d = os.path.join(REFDATA, name)
