@@ -86,6 +86,7 @@ EXIT STATUS
 """
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -314,15 +315,15 @@ def write_verified(dst, chunks, sha, size, label):
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     h = hashlib.sha256()
     n = 0
+    out = open(tmp, "xb")   # outside the try: a .part someone else made is not ours
     try:
-        with open(tmp, "xb") as out:
+        with out:
             for buf in chunks:
                 out.write(buf)
                 h.update(buf)
                 n += len(buf)
     except BaseException:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+        os.unlink(tmp)
         raise
     if n != size or h.hexdigest() != sha:
         os.unlink(tmp)
@@ -564,8 +565,9 @@ def step_fasta(rd, mode):
         print("  gunzip -c | bgzip -@ 4 -c  (a few minutes)")
         stream = hashlib.sha256()
         gz = bg = None
+        out = open(tmp, "xb")   # outside the try: a .part someone else made is not ours
         try:
-            with open(tmp, "xb") as out:
+            with out:
                 gz = subprocess.Popen(["gunzip", "-c", src], stdout=subprocess.PIPE)
                 bg = subprocess.Popen(["bgzip", "-@", "4", "-c"], stdin=subprocess.PIPE,
                                       stdout=out)
@@ -579,8 +581,7 @@ def step_fasta(rd, mode):
                 if proc is not None:
                     proc.kill()
                     proc.wait()
-            if os.path.exists(tmp):
-                os.unlink(tmp)
+            os.unlink(tmp)
             raise
         if rc != (0, 0) or stream.hexdigest() != FASTA_STREAM_SHA256:
             os.unlink(tmp)
@@ -754,15 +755,23 @@ def step_sites_index(rd, mode):
         if os.path.exists(dst):
             return [("present", rel)]
         return [("planned", rel)] if os.path.isfile(PANEL_INDEX_PY) else [("missing", rel + no_script)]
+    stem = rd.p("refdata/panel/sites_index.build")
     rows = [(state(dst, sha, size), rel)]
     if os.path.isfile(js):
         same = sha256_of(js) == SITES_INDEX_JSON
         rows.append(("ok" if same else "TEXT", "panel/sites_index.json"
                      + ("" if same else "  (timestamp, bcftools version)")))
+    elif rows[0][0] != "missing":
+        # weight_coverage.py opens the .json before the .bin; one without the other is broken
+        rows.append(("missing", "panel/sites_index.json  (the .bin is here without it)"))
     if rows[0][0] == "missing" and not os.path.isfile(PANEL_INDEX_PY):
         return [("missing", rel + no_script)] + rows[1:]
-    if mode == "check" or rows[0][0] == "ok":
+    if mode == "check" or all(st in ("ok", "TEXT") for st, _ in rows):
         return rows
+    if rows[0][0] == "ok":
+        refuse_stale(stem + ".bin", stem + ".json")
+        raise Stop("sites_index: the .json is missing beside a correct .bin. Move the .bin "
+                   "aside and rerun to rebuild both.")
     refuse_if_bad(rows, "sites_index")
     if os.path.exists(js):
         raise Stop("sites_index: the .json is here without its .bin. Move it aside.")
@@ -770,7 +779,6 @@ def step_sites_index(rd, mode):
     sites = rd.p(s["path"])
     if state(sites, s["sha256"], s["bytes"]) != "ok":
         raise Stop("sites_index: %s is missing or does not match the recipe" % sites)
-    stem = rd.p("refdata/panel/sites_index.build")
     refuse_stale(stem + ".bin", stem + ".json")
     need_tools("bcftools")
     # Run from agent/ with the path the original was built with, so the .json records
@@ -789,8 +797,10 @@ def step_sites_index(rd, mode):
     if state(stem + ".bin", sha, size) != "ok":
         raise Stop("sites_index: rebuilt %s.bin does not match (sha256 %s). It was NOT "
                    "moved into place." % (stem, sha256_of(stem + ".bin")))
-    os.rename(stem + ".bin", dst)
+    # .json first: an interruption between the two then leaves a .json without its .bin,
+    # which the next run refuses, rather than a .bin that looks complete.
     os.rename(stem + ".json", js)
+    os.rename(stem + ".bin", dst)
     same = sha256_of(js) == SITES_INDEX_JSON
     return [("ok", rel + "  (built)"),
             ("ok" if same else "TEXT", "panel/sites_index.json  (timestamp, bcftools version)")]
@@ -850,6 +860,16 @@ def main():
         steps = [(n, f) for n, f in STEPS if n in want]
 
     rd = Refdata(args.refdata, args.recipe)
+    if mode == "build":
+        # One build at a time per tree. The lock lives in refdata-downloads/, beside the
+        # root, because anything inside agent/refdata would be copied into run clones.
+        lockdir = rd.p("refdata-downloads")
+        os.makedirs(lockdir, exist_ok=True)
+        lock = open(os.path.join(lockdir, ".build_refdata.lock"), "a")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            sys.exit("another build_refdata.py is building this tree; wait for it.")
     print("refdata    %s" % rd.root)
     print("mode       %s" % mode)
     counts = {}

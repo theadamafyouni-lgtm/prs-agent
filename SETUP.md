@@ -226,10 +226,13 @@ staging, look here first. Read each before running it.
 > **As of 2026-09-24 `agent/refdata` can be rebuilt from public sources, with the
 > exceptions listed under "What is not reproduced".** Two scripts do it:
 > `fetch_refdata.py` downloads and `build_refdata.py` derives. Every file they produce is
-> checked by sha256 against the working box's copy. **UNVERIFIED on an empty machine:**
-> every step was run on the working box, into a scratch directory, from the same public
-> URLs; nobody has yet run the whole procedure on a bare box. The exceptions exist only
-> on the working box, so read the last subsection before wiping it.
+> checked by sha256 against the working box's copy. **UNVERIFIED on an empty machine.**
+> On the working box, `build_refdata.py` ran over an empty scratch directory, in two
+> passes because of disk space, from archives downloaded from the recipe's URLs.
+> `fetch_refdata.py`'s own download mode was run for 9 records, the JRE among them. The
+> 16 GB tarball, the FASTA and phase3 were downloaded by other means and hash-checked.
+> Nobody has yet run the whole procedure on a bare box. The exceptions exist only on the
+> working box, so read the last subsection before wiping it.
 
 Three files are involved, and they are easy to confuse:
 
@@ -250,6 +253,9 @@ mkdir -p agent/refdata-downloads
 #    -> agent/refdata-downloads/pgsc_HGDP+1kGP_v1.tar.zst from
 #       http://ftp.ebi.ac.uk/pub/databases/spot/pgs/resources/pgsc_HGDP+1kGP_v1.tar.zst
 #       (md5 2bd3586e9a09700f9bcbe62ba4dcee49, published beside it in md5s.txt)
+#    Parallel downloaders often preallocate the full size, and fetch_refdata.py checks
+#    size only, so an interrupted one looks complete. Check before going on:
+md5sum agent/refdata-downloads/pgsc_HGDP+1kGP_v1.tar.zst   # must print 2bd3586e...
 
 # 2. Everything else: about 20 GB more. --profile full adds the 6 GB imputation panel,
 #    which no case in the selection benchmark opens.
@@ -272,6 +278,9 @@ python3 build_refdata.py --check
 The whole rebuild peaks at about 62 GB (36 GB of downloads, 26 GB derived). After step 4
 you can delete `agent/refdata-downloads/` (17 GB). `fetch_refdata.py` counts an archive
 whose files are all in place as present, so it will not fetch the archives again.
+
+Run steps 2-4 as the user who owns the checkout. `sudo bash setup.sh` hands
+`agent/refdata/bin` to that user (`$SUDO_USER`) for this reason.
 
 What a correct rebuild reports on Linux, as observed on the working box's scratch rebuild:
 
@@ -444,10 +453,11 @@ What it did not settle, and what is still UNVERIFIED:
 
 - **§7, the port-patch order.** Whether a fresh clone needs the three `patch_*.py`.
 - **§10.** Neither the gate nor a paid run has been executed against a rebuilt machine.
-- **§8 on an empty machine.** Every `build_refdata.py` step was run on the working box,
-  building into a scratch directory from archives downloaded from the recipe's URLs, and
-  `--check` passed over the live tree. Every recipe URL was checked by hash. Nobody has
-  yet run `fetch_refdata.py` and then `build_refdata.py` on a bare box.
+- **§8 on an empty machine.** On the working box, `build_refdata.py` ran over an empty
+  scratch directory from archives downloaded from the recipe's URLs, and `--check` passed
+  over the live tree. `fetch_refdata.py`'s download mode was run for 9 records. Every
+  recipe URL was checked by hash. Nobody has yet run `fetch_refdata.py` and then
+  `build_refdata.py` on a bare box.
 
 Settled since: the basis rebuild on Linux reproduces `prune.prune.in` (`64a05450…039e`)
 and every other data file of `hgdp_basis/` except the two PCA files §8 names. It also

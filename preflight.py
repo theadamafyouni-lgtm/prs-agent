@@ -125,6 +125,13 @@ def check_refdata_binaries():
                  % (os.stat(p).st_mode & 0o777),
                  "chmod 755 %s" % p)
             continue
+        pinned = pinned_plink2() if name == "plink2" else None
+        if pinned and sha256_file(p) != pinned:
+            note(FAIL, "refdata/bin/plink2 is not the pinned build",
+                 "the published runs used PLINK v2.0.0-a.6.6LM 64-bit Intel (16 Jan 2025), "
+                 "sha256 %s..." % pinned[:12],
+                 "move it aside, then python3 build_refdata.py --only plink2")
+            continue
         rc, out = run([p, "--version"])
         if rc != 0:
             rc, out = run([p])   # liftOver prints usage and exits non-zero
@@ -136,8 +143,30 @@ def check_refdata_binaries():
             note(OK, "refdata/bin/%s" % name, first)
 
 
+def pinned_plink2():
+    """The sha256 refdata_recipe.json pins for refdata/bin/plink2, or None."""
+    try:
+        with open(os.path.join(REPO, "refdata_recipe.json")) as fh:
+            for a in json.load(fh).get("artifacts") or []:
+                if a.get("key") == "plink2" and "member" in a:
+                    return a["member"]["sha256"]
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def sha256_file(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def check_refdata_trees():
-    need = {"ancestry-ref": 30, "panel": 5, "fasta": 0.5, "chains": 0, "maps": 0}
+    # panel: 2.2 GB with the selection profile, 9 GB with --profile full (scoring).
+    need = {"ancestry-ref": 30, "panel": 2, "fasta": 0.5, "chains": 0, "maps": 0}
     rebuild = ("python3 fetch_refdata.py, then python3 build_refdata.py, each with "
                "its check (--verify, --check); SETUP.md section 8")
     # A clone has agent/refdata/ with only MANIFEST.json in it, so test the contents.
@@ -160,6 +189,42 @@ def check_refdata_trees():
                  "%.1f GB, expected at least %.0f" % (gb, min_gb))
         else:
             note(OK, "refdata/%s" % name, "%.1f GB" % gb)
+    missing = refdata_missing()
+    if missing:
+        note(FAIL, "refdata incomplete: %d file(s) missing or the wrong size" % len(missing),
+             ", ".join(missing[:3]) + (" ..." if len(missing) > 3 else ""), rebuild)
+    else:
+        note(OK, "refdata files", "every file a selection run reads is present at its "
+             "recorded size (python3 build_refdata.py --check hashes them)")
+
+
+def refdata_missing():
+    """Files a selection run reads that are absent or the wrong size, by name: every
+    selection-profile file in refdata_recipe.json (archives by the files they yield) and
+    what build_refdata.py derives. Size only; build_refdata.py --check does the hashing."""
+    recipe = os.path.join(REPO, "refdata_recipe.json")
+    if not os.path.isfile(recipe):
+        return ["refdata_recipe.json"]
+    with open(recipe) as fh:
+        arts = json.load(fh).get("artifacts") or []
+    want = []
+    for a in arts:
+        if a.get("key", "").startswith("panel_chr"):
+            continue
+        outs = a.get("members") or a.get("yields") or \
+            ({"x": a["member"]} if "member" in a else {"x": {"dest": a["path"], "bytes": a.get("bytes")}})
+        want += [(m["dest"], m.get("bytes")) for m in outs.values()
+                 if m["dest"].startswith("refdata/")]
+    want += [("refdata/ancestry-ref/hgdp_1kgp.panel", 68200),
+             ("refdata/panel/sites_index.bin", 392181824),
+             ("refdata/ancestry-ref/hgdp_basis/prune.prune.in", 2679865)]
+    want += [("refdata/ancestry-ref/phase3/chr%d.vcf.gz.done" % n, 0) for n in range(1, 23)]
+    out = []
+    for rel, size in want:
+        p = os.path.join(REPO, "agent", rel)
+        if not os.path.isfile(p) or (size is not None and os.path.getsize(p) != size):
+            out.append(rel[len("refdata/"):])
+    return out
 
 
 def check_shim():

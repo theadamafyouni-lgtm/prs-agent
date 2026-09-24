@@ -93,6 +93,8 @@ fi
 
 say "tool binaries in refdata"
 mkdir -p "$REFDATA/bin"
+# fetch_refdata.py and build_refdata.py write here and run as the user, not as root.
+[ -n "${SUDO_USER:-}" ] && chown "$SUDO_USER": "$REFDATA/bin"
 # plink2 must be exactly the build the published runs used: PLINK v2.0.0-a.6.6LM
 # 64-bit Intel (16 Jan 2025), sha256 below, pinned in refdata_recipe.json.
 # build_refdata.py extracts it from the official zip. A system plink2 is copied
@@ -108,11 +110,15 @@ if [ ! -x "$REFDATA/bin/plink2" ]; then
     warn "refdata/bin/plink2 is not in place. python3 build_refdata.py --only plink2"
     warn "installs the pinned build once fetch_refdata.py has downloaded its zip."
   fi
+elif [ "$(sha256sum "$REFDATA/bin/plink2" | cut -d' ' -f1)" != "$PLINK2_SHA256" ]; then
+  warn "refdata/bin/plink2 is not the pinned build (see SETUP.md section 3). Left as it"
+  warn "is; move it aside and run python3 build_refdata.py --only plink2 to replace it."
 fi
 if [ ! -f "$REFDATA/bin/liftOver" ]; then
   curl -sSL -o "$REFDATA/bin/liftOver" \
     https://hgdownload.soe.ucsc.edu/admin/exe/linux.x86_64/liftOver || \
     warn "could not download liftOver"
+  [ -n "${SUDO_USER:-}" ] && [ -f "$REFDATA/bin/liftOver" ] && chown "$SUDO_USER": "$REFDATA/bin/liftOver"
 fi
 # The execute bit, explicitly, every time.
 #

@@ -84,17 +84,20 @@ MANIFEST = os.path.join(REPO, "refdata_recipe.json")
 # the selection benchmark, which stops before scoring.
 SCORING_ONLY_PREFIXES = ("panel_chr",)
 
-# Free space build_refdata.py needs beyond the downloads: 15 GB of hgdp_1kgp members,
-# a 10 GB margin for the PCA basis, and about 1 GB for fasta, maps and sites_index.
-BUILD_HEADROOM = 26 * 1000 ** 3
+# api.adoptium.net answers Python's default User-Agent with 403; every other host in the
+# recipe accepts either. So say who is asking.
+USER_AGENT = "fetch_refdata.py (prs-agent; +https://github.com/theadamafyouni-lgtm/prs-agent)"
+
+GB = 1000 ** 3
 
 
 def human(b):
+    """Decimal units, as the docs and build_refdata.py use them."""
     b = float(b)
     for u in ("B", "KB", "MB", "GB"):
-        if b < 1024 or u == "GB":
+        if b < 1000 or u == "GB":
             return "%.1f %s" % (b, u)
-        b /= 1024.0
+        b /= 1000.0
     return "%.1f GB" % b
 
 
@@ -153,6 +156,21 @@ def unpacked(a):
         for m in ms.values())
 
 
+def build_headroom(arts):
+    """Free space build_refdata.py still needs beyond the downloads: the hgdp_1kgp
+    members if not yet extracted, 10 GB for the PCA basis if not yet built, and about
+    1 GB for fasta and sites_index if missing."""
+    need = 0
+    for a in arts:
+        if a.get("key") == "hgdp_1kgp_tarball" and not unpacked(a):
+            need += sum(m["bytes"] for m in members_of(a).values())
+        if a.get("key") == "fasta" and not unpacked(a):
+            need += 1 * GB
+    if not os.path.isdir(os.path.join(AGENT, "refdata", "ancestry-ref", "hgdp_basis")):
+        need += 10 * GB
+    return need
+
+
 def state_of(a):
     """present / wrong-size / missing, without hashing gigabytes every run."""
     p = dest_of(a)
@@ -168,7 +186,7 @@ def fetch(a, url=None):
     p = dest_of(a)
     os.makedirs(os.path.dirname(p), exist_ok=True)
     tmp = p + ".part"
-    src = url or a["url"]
+    src = urllib.request.Request(url or a["url"], headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(src) as r, open(tmp, "wb") as out:
         total = a.get("bytes") or 0
         got = 0
@@ -254,12 +272,13 @@ def main():
 
     st = os.statvfs(AGENT)
     free = st.f_bavail * st.f_frsize
+    headroom = build_headroom(arts)
     print()
     print("disk free    : %s" % human(free))
-    if bytes_todo and free < bytes_todo + BUILD_HEADROOM:
-        print("NOT ENOUGH ROOM. build_refdata.py needs about %s beyond the downloads "
-              "themselves (SETUP.md section 8), so this wants %s."
-              % (human(BUILD_HEADROOM), human(bytes_todo + BUILD_HEADROOM)))
+    if bytes_todo and free < bytes_todo + headroom:
+        print("NOT ENOUGH ROOM. This wants %s: the downloads, plus %s for what "
+              "build_refdata.py still has to derive (SETUP.md section 8)."
+              % (human(bytes_todo + headroom), human(headroom)))
         if not args.plan:
             return 1
 
