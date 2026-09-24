@@ -4,11 +4,13 @@ Ubuntu 24.04 (noble), 8 vCPU / 16 GB, 160 GB disk. Everything below was read off
 working machine on 2026-09-05 rather than recalled, **except where it says UNVERIFIED**.
 
 > **Read §8 before you plan anything.** On 2026-09-23 this document was audited against
-> the working box, section by section. §8 is not merely unverified — **it is wrong, and
-> `agent/refdata` cannot be rebuilt from these two repositories.** About 29 GB of it is
-> fetched by no script anywhere and must be copied from a machine that already has it.
-> Everything else in §1–§9 is now corrected and evidenced; §10 has still never been run
-> on a rebuilt box. Sections carrying an UNVERIFIED marker are the remaining gaps.
+> the working box, section by section, and §8 was found wrong. Since 2026-09-24,
+> `agent/refdata` can be rebuilt from public sources with `fetch_refdata.py` and
+> `build_refdata.py`, every file checked by sha256 against the working box's copy. It has
+> not yet been run on an empty machine. §8 lists the few files that cannot be reproduced,
+> and what to copy off the working box before a wipe. Everything else in
+> §1–§9 is corrected and evidenced. §10 has still never been run on a rebuilt box.
+> Sections carrying an UNVERIFIED marker are the remaining gaps.
 
 The four known failure points from the last attempt: numpy missing, plink2 not
 executable, macOS binaries staged instead of Linux ones, and `setup.sh` / `preflight.py`
@@ -18,7 +20,7 @@ executable, macOS binaries staged instead of Linux ones, and `setup.sh` / `prefl
 
 ```bash
 apt update
-apt install -y build-essential bcftools bubblewrap openjdk-17-jre-headless \
+apt install -y build-essential bcftools tabix zstd bubblewrap openjdk-17-jre-headless \
                python3-numpy python3-scipy python3-pandas \
                git curl unzip zip tmux
 ```
@@ -42,7 +44,8 @@ Confirmed present on the working box at these versions:
 | build-essential | 12.10ubuntu1 |
 | openjdk-17-jre-headless | 17.0.20.1+1~24.04 |
 
-`tabix` and `bgzip` come with bcftools; both are at `/usr/bin`.
+`tabix` and `bgzip` come from the `tabix` package, not with bcftools, which does not depend
+on it. `zstd` unpacks the HGDP+1kGP tarball. `build_refdata.py` (§8) needs all three.
 
 **bubblewrap is not optional.** It is the sandbox boundary on Linux, the counterpart of
 the macOS seatbelt, and `harness/harness/profile.py` generates its profile.
@@ -77,7 +80,7 @@ Four live outside apt, and two of them are the ones that went wrong last time.
 
 | binary | path on the working box | note |
 |---|---|---|
-| `plink2` | `/usr/local/bin/plink2` | **must be the Linux build and must be `chmod +x`.** Staging a macOS binary here is one of the four known failures |
+| `plink2` | `/usr/local/bin/plink2` | **must be the Linux build and must be `chmod +x`.** Staging a macOS binary here is one of the four known failures. The copy that matters is `agent/refdata/bin/plink2`: it must be exactly `PLINK v2.0.0-a.6.6LM 64-bit Intel (16 Jan 2025)`, sha256 `469bdf52…0d49`, the build every published run used. `build_refdata.py` (§8) installs it from `plink2-assets/alpha6/plink2_linux_x86_64_20250116.zip`, and `setup.sh` copies a system plink2 into refdata only if it is that same file |
 | `sandbox-exec` | `/usr/bin/sandbox-exec` | **not optional.** The harness launches every agent as `sandbox-exec -f <profile> <cmd>`, a macOS command; this shim translates the profile into bubblewrap arguments, so the harness never learns which platform it is on. It ships in this repo at `harness/sandbox-exec` and nothing installs it but the line below |
 | `nextflow` | `/usr/local/bin/nextflow` | needs java, which is why openjdk is above. **UNVERIFIED whether anything still uses it** — see below |
 | `claude` | `/usr/bin/claude` | via npm, see below |
@@ -101,7 +104,8 @@ anything is known to need it.
 
 `liftOver` and `beagle.jar` live under `agent/refdata/bin/` and come with the refdata,
 not with the system. **The `liftOver` in refdata must be the Linux build**, same trap as
-plink2.
+plink2. `beagle.jar` is in the manifest. `liftOver` is not: `setup.sh` downloads UCSC's
+current build, which is no longer the working box's (§8, "What is not reproduced").
 
 ## 4. Node and the Claude CLI
 
@@ -187,6 +191,9 @@ cp "$V/answer-key/answer-sets.csv" "$P/answer-side/"
 cp "$V"/batch-scripts/*.sh         "$P/harness/"
 cp "$V"/vm/*.py                    "$P/vm/"
 cp "$V"/vm-scripts/*               /root/
+# build_refdata.py needs it to build panel/sites_index, which the select stage reads.
+# It is gitignored here and never staged into a run (config.EXCLUDED_TOOLS_REASON).
+cp "$V/build-answer-side/tools/panel_index.py" "$P/agent/tools/"
 ```
 
 **Restore the token file before running anything.** `harness/harness/config.py` loads it
@@ -216,121 +223,166 @@ staging, look here first. Read each before running it.
 
 ## 8. Reference data, about 49 GB
 
-> **This section is not a procedure, and you cannot rebuild `agent/refdata` from these
-> two repositories.** Roughly 29 GB of it is fetched by nothing, anywhere. Tested
-> 2026-09-23 against the working box; what follows says which parts work and which do
-> not, so nobody else spends a day finding out. Do not wipe a machine that has this data
-> until the gap below is closed.
+> **As of 2026-09-24 `agent/refdata` can be rebuilt from public sources, with the
+> exceptions listed under "What is not reproduced".** Two scripts do it:
+> `fetch_refdata.py` downloads and `build_refdata.py` derives. Every file they produce is
+> checked by sha256 against the working box's copy. **UNVERIFIED on an empty machine:**
+> every step was run on the working box, into a scratch directory, from the same public
+> URLs; nobody has yet run the whole procedure on a bare box. The exceptions exist only
+> on the working box, so read the last subsection before wiping it.
 
-`agent/refdata` measures **49 GB** on the working box, in three tiers with three different
-origins. Only the first can be obtained by running something in this repository.
+Three files are involved, and they are easy to confuse:
 
-| tier | size | where it comes from |
+| file | tracked | what it is |
 |---|---|---|
-| manifest artifacts | 10.3 GB recorded (32 records); the default `selection` profile fetches 10 of them, **4.0 GB** | `agent/tools/stage_refdata.sh`, then `fetch_refdata.py`. **Works.** |
-| `ancestry-ref/hgdp_1kgp/` (14 GB) + `ancestry-ref/phase3/` (15 GB) | **29 GB** | **nothing.** No script, no manifest entry, no URL in either repository. This is the gap |
-| `ancestry-ref/hgdp_basis/` (8.6 GB) + `ancestry-ref/build/` + `ancestry-ref/build_p3chr1/` | 8.9 GB | derived from `hgdp_1kgp/` by five plink2 commands that existed only as text inside a log file. Now recorded — see step 4 |
+| `refdata_recipe.json` (repo root) | yes | The recipe. 81 records: URL, size and sha256 of every download. For archives, it also has the sha256 of each file they unpack to. Both scripts read it. |
+| `agent/refdata/MANIFEST.json` | yes | The 32-record manifest the Mac staging wrote, tracked **byte for byte as the published runs had it** (sha256 `268928a6…9cbe`). Every run clone contains it, and agents read it. Do not edit it; `build_refdata.py --check` fails if it changes. |
+| `agent/refdata-downloads/` | no, ignored | Where the archives land. It is outside `agent/refdata`, so no run clone sees it. |
 
-### The parts that work
+### The procedure
 
 ```bash
-# 1. The manifest is NOT in this repository. It lives in the private repo, because
-#    until 2026-09-23 the only copy on earth was inside the directory a wipe deletes.
-#    fetch_refdata.py exits immediately without it.
-mkdir -p agent/refdata
-cp /root/prs-agent-private/refdata-recipe/MANIFEST.json agent/refdata/MANIFEST.json
+# 1. The 16 GB HGDP+1kGP tarball first. One connection from the working box got
+#    0.6-0.7 MB/s, i.e. 6-8 hours with no resume, so fetch it any way you like
+#    (16 ranged connections took 37 min) and let it FINISH before step 2: a partial
+#    file counts as wrong-size and fetch_refdata.py would download it again over it.
+mkdir -p agent/refdata-downloads
+#    -> agent/refdata-downloads/pgsc_HGDP+1kGP_v1.tar.zst from
+#       http://ftp.ebi.ac.uk/pub/databases/spot/pgs/resources/pgsc_HGDP+1kGP_v1.tar.zst
+#       (md5 2bd3586e9a09700f9bcbe62ba4dcee49, published beside it in md5s.txt)
 
-# 2. Fetch the 10 selection-profile artifacts (~4.0 GB), or --profile full for all 32
-#    (~10.3 GB, adding the 22 per-chromosome imputation panel files). No case in the
-#    selection benchmark opens the panel.
+# 2. Everything else: about 20 GB more. --profile full adds the 6 GB imputation panel,
+#    which no case in the selection benchmark opens.
+python3 fetch_refdata.py --plan
 python3 fetch_refdata.py
+python3 fetch_refdata.py --verify        # reads every byte; expect 0 problems
 
-# 3. Check what landed.
-python3 fetch_refdata.py --verify
+# 3. Build what is derived: bin/plink2, hgdp_1kgp/, jre/ and maps/ out of their
+#    archives, fasta/ and its indexes, hgdp_1kgp.panel, the phase3 .done markers, the
+#    PCA basis hgdp_basis/, and panel/sites_index (which needs panel_index.py from the
+#    private repo, restored in section 6). About 26 GB free beyond the downloads and
+#    30-40 min. It never overwrites anything.
+python3 build_refdata.py --plan
+python3 build_refdata.py
+
+# 4. Check everything build_refdata.py is answerable for.
+python3 build_refdata.py --check
 ```
 
-`stage_refdata.sh` is the script that originally *wrote* the manifest, and it can write a
-fresh one if you would rather re-derive than copy. **It resolves macOS builds** —
-`plink2_mac_arm64_*.zip` and an `api.adoptium.net/.../mac/aarch64/...` JRE — because that
-is where it was first run. On Linux, `fetch_refdata.py` substitutes the linux/x64 JRE and
-says so out loud, but **it does not fix plink2**; replace that yourself and `chmod +x` it.
-This is why `--verify` permanently reports `MISMATCH plink2` and `MISSING jre` on a Linux
-box. Those two are expected. `fasta` and `maps` MISSING are not.
+The whole rebuild peaks at about 62 GB (36 GB of downloads, 26 GB derived). After step 4
+you can delete `agent/refdata-downloads/` (17 GB). `fetch_refdata.py` counts an archive
+whose files are all in place as present, so it will not fetch the archives again.
 
-### The part that does not work, and has no workaround
+What a correct rebuild reports on Linux, as observed on the working box's scratch rebuild:
 
-```
-agent/refdata/ancestry-ref/hgdp_1kgp/    14 GB   GRCh37_HGDP+1kGP_ALL.{pgen,pvar.zst,psam}
-agent/refdata/ancestry-ref/phase3/       15 GB   chr1-22 .vcf.gz + .tbi
-```
+- **Step 2 `--verify`:** every record `ok`, 0 problems.
+- **Step 4:** exit status **2**, not 0, with every row `ok` except:
+  - `LINUX` for `hgdp_basis/ref_pca.eigenvec` and `ref_pca.eigenvec.allele`;
+  - `TEXT` for the six `hgdp_basis` logs, `reference_build.json` and
+    `panel/sites_index.json`;
+  - `NOT-REPRODUCED` for `bin/liftOver`.
 
-**Neither is in `MANIFEST.json`. Neither is fetched by `fetch_refdata.py`, by
-`stage_refdata.sh`, or by any other script in either repository. There is no URL for
-either anywhere in the tracked tree.** `reference-provider/build_reference_panel.py`
-takes `phase3/` as a required input (`--phase3-dir`); nothing produces it.
+  Status 2 means "identical except what cannot be identical here". Status 1 means
+  something is missing or wrong. Without the private repo's `panel_index.py`,
+  `panel/sites_index.bin` is missing: step 4 exits 1, and the select stage cannot run.
 
-Today the only way to get these 29 GB is to copy them from a machine that already has
-them. **Somebody has to write this acquisition step.** Until then `agent/refdata` cannot
-be reconstructed, and neither can anything downstream of it.
+Do not run `agent/tools/stage_refdata.sh`. It wrote the original manifest on the Mac, and
+it ends every run by rewriting `agent/refdata/MANIFEST.json` from its own download
+records. That would replace the file run clones must see. `git checkout
+agent/refdata/MANIFEST.json` undoes it, and `build_refdata.py --check` notices it.
 
-### Building the PCA basis, once `hgdp_1kgp/` exists
+### Where each piece comes from, and how it was checked
 
-`reference-provider/build_reference.py` **does not do this.** It builds a per-patient
-INT-1 reference distribution, takes six required arguments, and contains no network code
-and no reference to `hgdp_basis`. Earlier versions of this section named it here; that was
-wrong.
+Unless noted, each source was downloaded or streamed in full on 2026-09-23 and its sha256
+compared with the working box's file.
 
-The basis was built by five plink2 commands run by hand on macOS on 2026-08-12. They were
-recorded only inside `agent/refdata/ancestry-ref/hgdp_basis/plink.log` — that is, only
-inside the directory a wipe deletes. Those logs are now in the private repo at
-`prs-agent-private/refdata-recipe/`, and the chain is:
+| under `agent/refdata/` | source | identity |
+|---|---|---|
+| `ancestry-ref/hgdp_1kgp/` (4 files, 15.0 GB) | The PGS Catalog `pgsc_calc` reference bundle `pgsc_HGDP+1kGP_v1.tar.zst` (ftp.ebi.ac.uk, published 2023-10-05). We use its GRCh37 half: gnomAD v3.1.2 HGDP+1kGP lifted down to GRCh37 by the PGS Catalog team. | The tarball's md5 equals the distributor's `md5s.txt`, which is the only anchor from outside, and it is an md5. Each member's sha256 equals the working box's file. gnomAD itself ships only GRCh38, so no gnomAD file can match. Downloaded over http; https content was not hashed. |
+| `ancestry-ref/phase3/` (44 files, 15.5 GB) | 1000 Genomes phase 3 **v5a** (2015), from the 1000 Genomes S3 bucket; NCBI's mirror serves the same bytes. It is **not** the Beagle panel, which is a filtered derivative, and **not** EBI's current `release/20130502/`, which is v5b (v5a was withdrawn there on 2021-03-17). | sha256 of all 44, from both hosts |
+| `ancestry-ref/phase3/*.done` | written by `build_refdata.py` once the chromosome's `.vcf.gz` and `.tbi` match | empty files |
+| `ancestry-ref/hgdp_1kgp.panel` | derived from the `.psam` by `build_refdata.py` | sha256 |
+| `ancestry-ref/hgdp_basis/` (9.2 GB) | `agent/tools/ancestry.py build-ref` with `--maf 0.05 --geno 0.02 --prune-window 200 --prune-step 50 --prune-r2 0.2 --pcs 20 --exclude-palindromic yes`, run by `build_refdata.py`. The "five plink2 commands" this section used to list are that script's output, and it writes `nonpalindromic.ids` itself. | sha256 for 15 of its 24 files, `prune.prune.in` (`64a05450…039e`) included. The rest are below. |
+| `bin/plink2` | `PLINK v2.0.0-a.6.6LM 64-bit Intel (16 Jan 2025)`, the member of `plink2-assets/alpha6/plink2_linux_x86_64_20250116.zip`. This is the binary `ancestry.py` calls and every published run used. The old manifest records the macOS build here, and fetching that on Linux replaced a working binary with a zip. | sha256 |
+| `jre/` (259 files) | The macOS aarch64 Temurin 21.0.11+10 JRE the Mac staged, from its versioned Adoptium URL. The old manifest's "latest" URL now serves 21.0.12.1. Every run clone had it, and no selection run starts Java. It does not run on Linux. | sha256 per file |
+| `fasta/GRCh37.fa.gz` + `.fai` + `.gzi` | Ensembl GRCh37 primary assembly, re-compressed with `bgzip` and indexed by htslib | sha256, plus a separate sha256 of the uncompressed sequence. htslib 1.19 (Ubuntu 24.04) reproduces the working box's bytes; which bgzip the Mac used is not recorded. |
+| `maps/` | the Beagle `plink.GRCh37.map.zip`, unpacked | sha256 per member |
+| `ancestry-ref/1kg.omni…vcf.gz` | the 1000 Genomes S3 mirror. The old manifest's EBI URL serves the same size but was not hashed (0.31 MB/s). | sha256 |
+| `chains/`, `bin/bref3.jar`, `bin/beagle.jar`, `bin/unbref3.jar`, `panel/` bref3 + sites VCF, `ancestry-ref/integrated_call_samples…panel` | recipe URLs (UCSC, Browning lab, Beagle, 1000 Genomes) | sha256 |
+| `MANIFEST.json` | this repository | sha256 |
 
-```bash
-B=agent/refdata/ancestry-ref
-plink2 --pfile $B/hgdp_1kgp/GRCh37_HGDP+1kGP_ALL vzs --autosome --snps-only just-acgt \
-       --max-alleles 2 --set-all-var-ids @:# --rm-dup exclude-all --maf 0.05 --geno 0.02 \
-       --make-pgen --out $B/hgdp_basis/ref_raw
-plink2 --pfile $B/hgdp_basis/ref_raw    --extract $B/hgdp_basis/nonpalindromic.ids \
-       --make-pgen --out $B/hgdp_basis/ref_nonpal
-plink2 --pfile $B/hgdp_basis/ref_nonpal --indep-pairwise 200 50 0.2 \
-       --out $B/hgdp_basis/prune
-plink2 --pfile $B/hgdp_basis/ref_nonpal --extract $B/hgdp_basis/prune.prune.in \
-       --make-pgen --out $B/hgdp_basis/ref_pruned
-plink2 --pfile $B/hgdp_basis/ref_pruned --freq --pca allele-wts 20 \
-       --out $B/hgdp_basis/ref_pca
-```
+The basis is not slow. The Mac built it in 1 min 47 s. On this box, `ancestry.py` with
+the Linux binary takes about 10 min.
 
-Two warnings about this chain:
+### What is not reproduced, and why
 
-- **`nonpalindromic.ids` (62 MB) is an input to step 2 and has no generating script
-  either.** It is in no repository. Same problem as the 29 GB, smaller.
-- **It has only ever run on macOS**, with `plink2 v2.0.0-a.7.1 M1`. The Linux binary in
-  refdata is `v2.0.0-a.6.6LM 64-bit Intel`. Whether a Linux rerun reproduces
-  `prune.prune.in` byte-for-byte is **untested**, and it matters: that file's sha256 is
-  `64a05450cb77fb3e974c8b16312d0a7f3d0639794e7ffb6807600f30b61f039e` and a rerun that
-  does not reproduce it is not reproducing the published results.
+1. **`hgdp_basis/ref_pca.eigenvec` and `ref_pca.eigenvec.allele`.** The working box's
+   copies were built on macOS with `plink2 a.7.1 M1`. On Linux, 1 of 78,840 `eigenvec`
+   values and about 36 of 9.2 million `eigenvec.allele` values come out one unit
+   different in the 6th significant digit. There are no sign or order changes, and the
+   effect on a projection is below 1e-10 of a PC's SD. No Linux plink2 build, version,
+   thread count or MKL setting tested reproduces the Mac's bytes, and why the Mac
+   differs is not established. On Linux, `eigenvec.allele` also varies with `--threads`
+   and with the binary's SIMD level, so a machine with another CPU count gives a sha256
+   nobody has seen. `build_refdata.py` reports these files as `LINUX` in two cases: the
+   sha256 is one a Linux rebuild has produced before, or the file matches a fingerprint
+   of the Mac one (identical row IDs and order, 60 per-PC checksums within 1e-5). Anything
+   else is `BAD`.
 
-It is not slow, whatever this section used to say. The logs timestamp the whole basis
-build at **1 minute 47 seconds** (12:53:29 → 12:55:16). The hours go into the downloads
-and into moving the 29 GB, not into the PCA.
+   **This does not touch the published results. No published run read `hgdp_basis/`.**
+   Each run built its own basis in `runs/<run>/ancestry/ref/` with `ancestry.py`, the
+   inputs above and the Linux plink2, and the harness recorded a sha256 of every per-run
+   file of 64 MB or less. For the 129 published runs that used these parameters, every
+   recorded hash equals the Linux rebuild:
+   - `prune.prune.in`, `nonpalindromic.ids`, `ref_pca.afreq`, `ref_pca.eigenval`,
+     `ref_pruned.pvar`, `ref_pruned.psam`, `sample_labels.json`;
+   - `ref_pca.eigenvec`, which is the Linux `c013b043…`, not the Mac file.
 
-### What has to end up present
+   `eigenvec.allele` (97 MB) was not hashed. Its recorded size equals the Linux 8-thread
+   build's in 128 of the 129 runs. The other 106 published runs chose other parameters,
+   and 56 have no per-run basis files. Rerunning a case rebuilds its basis. On a machine
+   with a different CPU count, its `eigenvec.allele` differs from this box's in a few
+   printed values, because `ancestry.py` does not pin `--threads`.
+2. **`hgdp_basis/*.log`, `hgdp_basis/reference_build.json` and `panel/sites_index.json`.**
+   They carry timestamps, a host, a working directory and tool versions. The `hgdp_basis`
+   copies were also path-edited by the `build/ → agent/` rename on 2026-09-23. The six
+   logs are also in the private repo (`refdata-recipe/`; pre-rename originals at commit
+   `04bde3e`). `reference_build.json` and `sites_index.json` exist only on the working box.
+3. **`bin/liftOver`.** `setup.sh` downloads UCSC's current `linux.x86_64/liftOver`. UCSC
+   replaced that on 2026-09-09, and the working box's copy (sha256 `6529f911…`) matches
+   no public build found. The agent runs it itself at the door stage, for hg18 → hg19
+   lifts with `chains/hg18ToHg19.over.chain.gz`. Keep the working box's copy.
+4. **`panel/sites_index.bin`: reproducible, but only with the private repo.** The select
+   stage reads it (`weight_coverage.py`). Its builder, `agent/tools/panel_index.py`, is
+   gitignored here. With it restored as in §6, `build_refdata.py` rebuilds the `.bin`
+   byte for byte.
+5. **`ancestry-ref/build/` and `build_p3chr1/` (about 265 MB).** An older `ancestry.py`
+   derived these from phase3 chr1–3, restricted to one patient's array positions. That
+   input is gone, so they cannot be rebuilt at all. `REFDATA_DELETE` removes both from
+   every run clone, so no run sees them.
+6. **The staging records at the top of `agent/refdata`:** `staging.log`,
+   `ancestry_build.log`, `phase3_fetch.log`, `phase3_rest.log` and `panel_index.log`.
+   These are logs of the original staging on the Mac, not inputs, and they cannot be
+   regenerated. `staging.log` and `ancestry_build.log` were also path-edited on
+   2026-09-23. The empty `ancestry-ref/phase3_sub/` and a `.DS_Store` are not
+   reproduced either.
 
-- `agent/refdata/ancestry-ref/hgdp_1kgp/` — the HGDP+1kGP panel, the projection basis.
-  **No fetch step exists**
-- `agent/refdata/ancestry-ref/phase3/` — 1000G phase3 b37 VCFs, chr1–22.
-  **No fetch step exists**
-- `agent/refdata/ancestry-ref/hgdp_basis/prune.prune.in` — 230,243 pruned markers,
-  sha256 `64a05450cb77fb3e974c8b16312d0a7f3d0639794e7ffb6807600f30b61f039e`
-- `agent/refdata/panel/` — the imputation panel, bref3 per chromosome. **Only fetched by
-  `--profile full`**; the selection benchmark never opens it
-- `agent/refdata/fasta/GRCh37.fa.gz` — 751 MB bgzipped, plus `.fai` and `.gzi`
-- `agent/refdata/maps/` — genetic maps
-- `agent/refdata/bin/` — `plink2`, `liftOver`, `beagle.jar`, `bref3.jar`, `unbref3.jar`
-- `agent/refdata/jre/` — the bundled JRE. **Not in `bin/`**, as this section used to say.
-  On the working box every file in `jre/bin/` is mode 644, `java` included;
-  `setup.sh`'s `chmod 755` covers `refdata/bin/*` only. Nothing currently uses it —
-  `preflight.py` checks `/usr/bin/java` — but it is the plink2 mode-644 trap, unfixed
+A rebuilt Linux box cannot score. Scoring runs Beagle, which needs Java, and the only JRE
+recorded is the macOS one above. That is what the published runs had, and none of them
+scored.
+
+### Before wiping the working box
+
+Items 1, 3, 5 and 6, plus `reference_build.json` and `sites_index.json` from item 2, exist
+only on the working box. That is about 400 MB:
+- `bin/liftOver`;
+- the two `hgdp_basis` PCA files and its `reference_build.json`;
+- `panel/sites_index.json`;
+- `ancestry-ref/build/` and `build_p3chr1/`;
+- the top-level logs.
+
+Copy them somewhere safe first. Nothing a published run read would be lost by skipping
+item 5, but it is the only provenance for the earlier results built from it.
 
 ## 9. Fixtures and personas
 
@@ -385,17 +437,22 @@ What the audit settled:
 
 - **§2, the real Python requirements.** Answered. `numpy` is required; `scipy` only
   because preflight demands it; `pandas` and `requests` are needed by nothing.
-- **§8, the refdata fetch.** Answered, and the answer is that it cannot be done.
-  29 GB has no acquisition step in either repository.
+- **§8, the refdata fetch.** Answered. As of 2026-09-24, `fetch_refdata.py` and
+  `build_refdata.py` rebuild it, checked by sha256, except for the items §8 lists.
 
 What it did not settle, and what is still UNVERIFIED:
 
 - **§7, the port-patch order.** Whether a fresh clone needs the three `patch_*.py`.
 - **§10.** Neither the gate nor a paid run has been executed against a rebuilt machine.
-- **Whether the five plink2 commands in §8 reproduce `prune.prune.in` on Linux.** They
-  have only ever run on macOS, and a rerun that does not reproduce that sha256 is not
-  reproducing the published results.
+- **§8 on an empty machine.** Every `build_refdata.py` step was run on the working box,
+  building into a scratch directory from archives downloaded from the recipe's URLs, and
+  `--check` passed over the live tree. Every recipe URL was checked by hash. Nobody has
+  yet run `fetch_refdata.py` and then `build_refdata.py` on a bare box.
 
-**Do not wipe the working box.** Not "until this has been run somewhere else" — the
-audit established that `agent/refdata` cannot be reconstructed from these repositories
-at all, so a wipe destroys roughly 38 GB with no way back. Close §8's gap first.
+Settled since: the basis rebuild on Linux reproduces `prune.prune.in` (`64a05450…039e`)
+and every other data file of `hgdp_basis/` except the two PCA files §8 names. It also
+reproduces, by the hashes the harness recorded, the per-run bases of the 129 published
+runs that used the standard parameters.
+
+**Do not wipe the working box before copying off the ~400 MB §8 lists** under "Before
+wiping the working box". Everything else under `agent/refdata` can now be rebuilt.

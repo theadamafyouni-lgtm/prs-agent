@@ -25,8 +25,9 @@ number anyway is the failure.
 
 ## What you need
 
-A Linux machine. Ubuntu 22.04 or 24.04, 8 cores, 16 GB RAM, and **at least 60 GB
-of free disk**. A single case takes 25 to 40 minutes.
+A Linux machine. Ubuntu 22.04 or 24.04, 8 cores, 16 GB RAM, and **at least 75 GB
+of free disk**: rebuilding the reference data peaks near 62 GB, and each running case
+needs room of its own. A single case takes 25 to 40 minutes.
 
 You will also need a Claude account, because the agent under test is Claude Code
 running inside a sandbox.
@@ -38,25 +39,23 @@ The macOS path exists but is not in this repository yet. See
 
 ## Setup
 
-Four steps, and **one of them cannot be completed from this repository.** Read
-`SETUP.md` §8 before starting; the short version is that about 29 GB of the
-reference data is fetched by no script anywhere and has to be copied from a
-machine that already has it.
+Five steps. The reference data is about 49 GB and takes the longest: read
+`SETUP.md` §8 before starting. It is rebuilt from public sources and checked by
+sha256 against the copy that produced the published results, except for a few
+files §8 names.
 
 ```bash
 git clone <this repo> && cd prs-agent
 sudo bash setup.sh                    # packages, sandbox, tool binaries
-python3 fetch_refdata.py              # ~4 GB: the manifest artifacts only
-#                                     # then: copy agent/refdata from a machine
-#                                     # that has it -- see SETUP.md §8
+python3 fetch_refdata.py              # ~36 GB of downloads; then --verify
+python3 build_refdata.py              # derives the rest; then --check
 python3 preflight.py                  # says whether the machine is ready
 ```
 
 `reference-provider/build_reference.py` used to appear here as the step that
 "builds the PCA basis". It does not: it builds a per-patient INT-1 reference
-distribution and takes six required arguments. The PCA basis comes from five
-plink2 commands recorded in the private repo under `refdata-recipe/`, and their
-14 GB input is part of the 29 GB above.
+distribution and takes six required arguments. The PCA basis comes from
+`agent/tools/ancestry.py build-ref`, which `build_refdata.py` runs.
 
 Then sign in, **in this order**:
 
@@ -221,11 +220,14 @@ harness/
 reference-provider/             builds the reference distribution
 grade.py                        grader
 preflight.py, setup.sh          environment
-fetch_refdata.py                the 24 GB of public reference data
+fetch_refdata.py, build_refdata.py
+                                download (~36 GB) and derive agent/refdata
+refdata_recipe.json             what they fetch, with a sha256 for every file
 ```
 
-Not in the repository, and cannot be: `agent/refdata` (tens of gigabytes, fetched
-by `fetch_refdata.py`), the participants' genotype files, and the answer key.
+Not in the repository, and cannot be: the contents of `agent/refdata` (tens of
+gigabytes; only its `MANIFEST.json` is tracked, and the two scripts above rebuild the
+rest), the participants' genotype files, and the answer key.
 
 ---
 

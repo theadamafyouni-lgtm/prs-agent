@@ -113,7 +113,9 @@ def check_refdata_binaries():
         p = os.path.join(REFDATA, "bin", name)
         if not os.path.isfile(p):
             note(FAIL, "refdata/bin/%s missing" % name, "",
-                 "see setup.sh; plink2 comes from the system package, liftOver from "
+                 "python3 build_refdata.py --only plink2 (the pinned build, after "
+                 "fetch_refdata.py)" if name == "plink2" else
+                 "see setup.sh; liftOver comes from "
                  "hgdownload.soe.ucsc.edu/admin/exe/linux.x86_64/liftOver")
             continue
         if not os.access(p, os.X_OK):
@@ -136,19 +138,20 @@ def check_refdata_binaries():
 
 def check_refdata_trees():
     need = {"ancestry-ref": 30, "panel": 5, "fasta": 0.5, "chains": 0, "maps": 0}
-    if not os.path.isdir(REFDATA):
-        note(FAIL, "agent/refdata missing",
-             "about 49 GB of reference data. It is not in the repository and "
-             "cannot be: it is far larger than git will take.",
-             "copy it from a machine that has it. It cannot be rebuilt here: "
-             "fetch_refdata.py gets 4 GB of the 49, and 29 GB (ancestry-ref/"
-             "hgdp_1kgp, ancestry-ref/phase3) is fetched by no script in either "
-             "repository. See SETUP.md section 8.")
+    rebuild = ("python3 fetch_refdata.py, then python3 build_refdata.py, each with "
+               "its check (--verify, --check); SETUP.md section 8")
+    # A clone has agent/refdata/ with only MANIFEST.json in it, so test the contents.
+    if not any(os.path.isdir(os.path.join(REFDATA, n)) for n in need):
+        note(FAIL, "agent/refdata is empty",
+             "about 49 GB of reference data. Only its MANIFEST.json is in the "
+             "repository: the rest is far larger than git will take.",
+             "rebuild it: " + rebuild + ". A few files cannot be reproduced; that "
+             "section lists them.")
         return
     for name, min_gb in need.items():
         d = os.path.join(REFDATA, name)
         if not os.path.isdir(d):
-            note(FAIL, "refdata/%s missing" % name, "", "see refdata/MANIFEST.json")
+            note(FAIL, "refdata/%s missing" % name, "", rebuild)
             continue
         rc, out = run(["du", "-sb", d], timeout=180)
         gb = (int(out.split()[0]) / 1024.0 ** 3) if rc == 0 and out.split() else 0
