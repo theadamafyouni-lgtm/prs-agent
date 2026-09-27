@@ -12,18 +12,19 @@
 #
 # Two things are left for a person, and the demo does not work without them.
 #
-#   The reference data. agent/refdata is about 49 GB: the HGDP+1kGP panel, a
-#   1000 Genomes phase 3 subset, GRCh37 and GRCh38 FASTA, liftOver chains and
-#   recombination maps. It is far past what git will hold, so it is not in this
-#   repository and cannot be.
+#   The reference data. agent/refdata is about 49 GB: the HGDP+1kGP panel,
+#   1000 Genomes phase 3, a GRCh37 FASTA, liftOver chains, recombination maps and
+#   the imputation panel. It is far past what git will hold, so only its manifest
+#   is in this repository.
 #
-#   COPY IT FROM A MACHINE THAT HAS IT. That is not a preference, it is the only
-#   way. Verified 2026-09-23: about 29 GB of it -- ancestry-ref/hgdp_1kgp/ and
-#   ancestry-ref/phase3/ -- is fetched by no script in either repository and has
-#   no URL anywhere in the tracked tree. fetch_refdata.py gets 4 GB of the 49.
-#   Earlier text here said to build it with reference-provider/build_reference.py;
-#   that script builds a per-patient INT-1 distribution and has no network code.
-#   See SETUP.md section 8.
+#   Since 2026-09-24 it is rebuilt from public sources, each file checked by
+#   sha256 against the copy that produced the published results:
+#     python3 fetch_refdata.py;  python3 fetch_refdata.py --verify
+#     python3 build_refdata.py;  python3 build_refdata.py --check
+#   (Not chained with &&: on Linux a correct rebuild exits 2, not 0, because a
+#   few files cannot come out identical. SETUP.md section 8 says which and why.)
+#   A few files cannot be reproduced (bin/liftOver among them); SETUP.md
+#   section 8 lists them, and says what to copy off a working box first.
 #
 #   Signing in to Claude Code. It is interactive and cannot be scripted. Note the
 #   order, because it is not the obvious one: sign in FIRST, then pin the CLI
@@ -57,8 +58,10 @@ apt-get update -qq
 #
 # apt rather than pip on purpose: the harness runs behind an allow-list proxy that
 # blocks PyPI with a 403, so pip cannot reach anything from inside a run.
+# tabix provides bgzip and zstd unpacks the HGDP+1kGP tarball; build_refdata.py needs
+# both, and bcftools does not pull either in.
 apt-get install -y -qq \
-    bubblewrap bcftools python3-numpy python3-scipy python3-pandas \
+    bubblewrap bcftools tabix zstd python3-numpy python3-scipy python3-pandas \
     default-jre curl unzip zip tmux >/dev/null
 say "  bubblewrap $(bwrap --version 2>&1 | awk '{print $2}')"
 
@@ -90,21 +93,32 @@ fi
 
 say "tool binaries in refdata"
 mkdir -p "$REFDATA/bin"
-# plink2: the system package is the same program. Copied rather than symlinked
-# because refdata is bind-mounted read-only into the sandbox and a symlink out of
-# it would dangle.
+# fetch_refdata.py and build_refdata.py write here and run as the user, not as root.
+[ -n "${SUDO_USER:-}" ] && chown "$SUDO_USER": "$REFDATA/bin"
+# plink2 must be exactly the build the published runs used: PLINK v2.0.0-a.6.6LM
+# 64-bit Intel (16 Jan 2025), sha256 below, pinned in refdata_recipe.json.
+# build_refdata.py extracts it from the official zip. A system plink2 is copied
+# only if it is that same file (copied, not symlinked, because refdata is
+# bind-mounted read-only into the sandbox and a symlink out of it would dangle).
+PLINK2_SHA256=469bdf52266b984e4acbcb68db7efc69ac4f550d64a95fd257e66989be330d49
 if [ ! -x "$REFDATA/bin/plink2" ]; then
-  if command -v plink2 >/dev/null; then
-    cp "$(command -v plink2)" "$REFDATA/bin/plink2"
+  sys_plink2=$(command -v plink2 || true)
+  if [ -n "$sys_plink2" ] && \
+     [ "$(sha256sum "$sys_plink2" | cut -d' ' -f1)" = "$PLINK2_SHA256" ]; then
+    cp "$sys_plink2" "$REFDATA/bin/plink2"
   else
-    warn "plink2 is not installed on this machine and is not in refdata/bin."
-    warn "Get it from https://www.cog-genomics.org/plink/2.0/"
+    warn "refdata/bin/plink2 is not in place. python3 build_refdata.py --only plink2"
+    warn "installs the pinned build once fetch_refdata.py has downloaded its zip."
   fi
+elif [ "$(sha256sum "$REFDATA/bin/plink2" | cut -d' ' -f1)" != "$PLINK2_SHA256" ]; then
+  warn "refdata/bin/plink2 is not the pinned build (see SETUP.md section 3). Left as it"
+  warn "is; move it aside and run python3 build_refdata.py --only plink2 to replace it."
 fi
 if [ ! -f "$REFDATA/bin/liftOver" ]; then
   curl -sSL -o "$REFDATA/bin/liftOver" \
     https://hgdownload.soe.ucsc.edu/admin/exe/linux.x86_64/liftOver || \
     warn "could not download liftOver"
+  [ -n "${SUDO_USER:-}" ] && [ -f "$REFDATA/bin/liftOver" ] && chown "$SUDO_USER": "$REFDATA/bin/liftOver"
 fi
 # The execute bit, explicitly, every time.
 #
@@ -136,9 +150,8 @@ if [ -d "$REFDATA/ancestry-ref" ] && [ -d "$REFDATA/panel" ]; then
   say "  present, $(du -sh "$REFDATA" 2>/dev/null | cut -f1)"
 else
   warn "agent/refdata is missing or incomplete. About 49 GB, not in this repo."
-  warn "Copy it from a machine that has it. It cannot be rebuilt here: 29 GB of"
-  warn "it (ancestry-ref/hgdp_1kgp, ancestry-ref/phase3) is fetched by no script"
-  warn "in either repository. See SETUP.md section 8."
+  warn "Rebuild it: python3 fetch_refdata.py, then python3 build_refdata.py,"
+  warn "each with its check (--verify, --check). See SETUP.md section 8."
 fi
 
 echo

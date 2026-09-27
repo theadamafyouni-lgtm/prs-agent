@@ -8,8 +8,12 @@ answer-side/
 pgp-candidates/
 
 # --- too large for git, fetched by fetch_refdata.py ------------------------
-agent/refdata/
+# The contents are ignored, not the directory, so that the manifest can be
+# tracked: git cannot re-include a file whose parent directory is excluded.
+agent/refdata/*
 !agent/refdata/MANIFEST.json
+# archives fetch_refdata.py downloads and build_refdata.py unpacks
+agent/refdata-downloads/
 reference-provider/inputs/
 reference-provider/*.log
 reference-provider/plink2
