@@ -26,9 +26,15 @@ not derail anything.
 
 ## 2. Build the reference
 
-**No PCA basis is staged. Build one every run.** Any `refdata/ancestry-ref/build`
-directory is removed from the per-run clone on purpose: it was derived from a patient's own
-positions, and staging it would hand you a finished projection.
+**Build a PCA basis every run, and do not use the one already sitting in your clone.**
+`refdata/ancestry-ref/hgdp_basis/` is a complete prebuilt basis and it *is* staged. It was
+built with parameters that are not the ones you are about to choose, so projecting against
+it is not the computation this stage asks for. Build your own, and say in your judgment
+that you did.
+
+`refdata/ancestry-ref/build/` and `build_p3chr1/` are a different matter and are removed
+from the clone on purpose: they were derived from a patient's own positions, and staging
+them would hand you a finished projection.
 
 Build from the HGDP + 1000 Genomes panel at
 `refdata/ancestry-ref/hgdp_1kgp/GRCh37_HGDP+1kGP_ALL`. It is a plink2 pgen fileset, passed
