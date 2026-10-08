@@ -100,6 +100,21 @@ def cmd_run(args):
                                 args.model)
     if problem:
         sys.exit("run_harness.py: " + problem)
+    # The agent is the host's `claude`, run inside the sandbox. If that binary cannot run, every
+    # case dies in well under a second with "execvp claude: Permission denied" -- the same
+    # signature SETUP.md attributes to a CLI version problem. On 2026-10-08 it was a
+    # half-finished npm reinstall that left a 500-byte stub at bin/claude.exe. Say which.
+    try:
+        import subprocess
+        v = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=60)
+        cli_ok = v.returncode == 0 and "Claude Code" in v.stdout
+        cli_msg = (v.stdout + v.stderr).strip()[:300]
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        cli_ok, cli_msg = False, str(exc)
+    if not cli_ok:
+        sys.exit("run_harness.py: the claude CLI on this host does not run (%s). Every agent "
+                 "would die at launch. Reinstall it (SETUP.md section 4) and check "
+                 "`claude --version` before running a case." % cli_msg)
     if args.stop_after not in ("door", "ancestry", "select") and not args.bare:
         os.makedirs(config.SANDBOXES, exist_ok=True)
         free_gb = shutil.disk_usage(config.SANDBOXES).free / 1e9
