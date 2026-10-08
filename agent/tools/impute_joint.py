@@ -32,6 +32,7 @@ import argparse
 import gzip
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -207,10 +208,13 @@ def run_chain(step, cmds, stdout_path=None):
         if stdout_path:
             out_fh.close()
     timed(step, t0)
-    for p, err in zip(procs, errs):
-        if p.returncode != 0:
-            raise Failed(step, p.returncode,
-                         "".join((e or b"").decode(errors="replace") for e in errs))
+    codes = [p.returncode for p in procs]
+    if any(codes):
+        # When a downstream stage dies, every stage upstream of it is killed by SIGPIPE; the
+        # code worth recording is the first one that is not that.
+        real = [rc for rc in codes if rc not in (0, -signal.SIGPIPE)]
+        raise Failed(step, real[0] if real else next(rc for rc in codes if rc),
+                     "".join((e or b"").decode(errors="replace") for e in errs))
 
 
 def query_gzip(step, cmd, out_path):
@@ -299,6 +303,18 @@ def main():
     cohort_dir = os.path.join(args.out_dir, "cohort")
     os.makedirs(cohort_dir, exist_ok=True)
 
+    # Fail before hours of compute rather than during them: a run that filled the disk mid-way
+    # lost its whole score stage. The outputs come to roughly half the reference's size (the
+    # 302-sample cohort VCF is most of it); ask for 0.6x of it free.
+    ref_paths = [os.path.join(args.panel_dir, f"chr{c}.snv.vcf.gz") if args.panel_dir
+                 else os.path.join(args.phase3_dir, f"chr{c}.vcf.gz")
+                 for c in parse_chroms(args.chromosomes)]
+    need = int(0.6 * sum(os.path.getsize(p) for p in ref_paths if os.path.exists(p)))
+    free = shutil.disk_usage(args.out_dir).free
+    if free < need:
+        die(f"{free / 1e9:.1f} GB free under {args.out_dir}; these chromosomes need about "
+            f"{need / 1e9:.1f} GB for their outputs. Free space first.")
+
     java = find_java()
     beagle_probe = subprocess.run([java, "-jar", BEAGLE], capture_output=True, text=True)
     version_text = (beagle_probe.stdout + beagle_probe.stderr).strip()
@@ -315,7 +331,8 @@ def main():
         if not (os.path.exists(src) and os.path.exists(src + ".tbi")):
             print(f"chr{c}: SKIPPED_no_source", file=sys.stderr)
             return {"chrom": c, "status": "SKIPPED_no_source", "source": src}
-        if args.panel_dir and not os.path.exists(os.path.join(args.panel_dir, f"chr{c}.snv.vcf.gz")):
+        panel = os.path.join(args.panel_dir, f"chr{c}.snv.vcf.gz") if args.panel_dir else None
+        if panel and not (os.path.exists(panel) and os.path.exists(panel + ".tbi")):
             print(f"chr{c}: SKIPPED_no_panel", file=sys.stderr)
             return {"chrom": c, "status": "SKIPPED_no_panel", "source": src}
         if not os.path.exists(gmap):
@@ -326,6 +343,12 @@ def main():
             return {"chrom": c, "status": "SKIPPED_output_exists", "source": src,
                     "map": gmap, "patient_output": patient_out}
 
+        # Final names are only ever written by os.replace after every step has succeeded, so a
+        # chr<N>.vcf.gz in --out-dir is always complete: downstream tools glob that directory,
+        # and --skip-existing trusts it. A failure part-way (ENOSPC took a run down this way)
+        # leaves nothing behind under a final name.
+        patient_tmp = os.path.join(work, f"chr{c}.patient.vcf.gz")
+        dr2_tmp = os.path.join(work, f"chr{c}.dr2.tsv.gz")
         entry = {"chrom": c, "source": src, "map": gmap,
                  "patient_output": patient_out, "cohort_output": cohort_stem + ".vcf.gz",
                  "dr2_table": dr2_out, "beagle_log": os.path.join(args.out_dir, f"chr{c}.beagle.log")}
@@ -359,9 +382,12 @@ def main():
             # patient and the DR2 measured over them would not describe the patient's imputation.
             # -R (index jumps), not -T (stream the whole 2,504-sample file): the same records,
             # byte for byte (checked on chr22), without parsing the chromosome end to end.
+            # --regions-overlap pos gives -R exactly -T's rule (a record is kept only if its POS
+            # is a typed position), not -R's default of any overlap.
             run_step("bcftools view (hold-out)",
                      ["bcftools", "view", "-S", args.holdout_samples, "--force-samples",
-                      "-m2", "-M2", "-v", "snps", "-R", args.typed_positions, src,
+                      "-m2", "-M2", "-v", "snps", "-R", args.typed_positions,
+                      "--regions-overlap", "pos", src,
                       "-Oz1", "--threads", args.threads, "-o", hold_vcf])
             run_step("bcftools index (hold-out)", ["bcftools", "index", "-f", "-t", hold_vcf])
             if args.panel_dir:
@@ -429,9 +455,9 @@ def main():
             run_chain("bcftools view (patient)",
                       [["bgzip", "-dc", cohort_stem + ".vcf.gz"],
                        ["cut", "-f1-10"],
-                       ["sed", f"/^#CHROM/i ##contig=<ID={c}>"],
-                       ["bcftools", "view", "-s", args.patient_id, "-Oz", "-o", patient_out]])
-            run_step("bcftools index (patient)", ["bcftools", "index", "-f", "-t", patient_out])
+                       ["sed", f"/^#CHROM/i\\\n##contig=<ID={c}>"],
+                       ["bcftools", "view", "-s", args.patient_id, "-Oz", "-o", patient_tmp]])
+            run_step("bcftools index (patient)", ["bcftools", "index", "-f", "-t", patient_tmp])
 
             # DR2/IMP -- estimated across the whole Beagle target. INFO is site-level, so the
             # patient file carries the cohort's DR2 and IMP unchanged (bcftools view -s only
@@ -440,8 +466,8 @@ def main():
             query_gzip("bcftools query (dr2)",
                        ["bcftools", "query", "-f",
                         "%CHROM\t%POS\t%REF\t%ALT\t%INFO/DR2\t%INFO/IMP\n",
-                        patient_out],
-                       dr2_out)
+                        patient_tmp],
+                       dr2_tmp)
 
             err = cohort_index.communicate()[1]
             timed("bcftools index (cohort, concurrent)", t_cohort_index)
@@ -450,13 +476,26 @@ def main():
                              (err or b"").decode(errors="replace"))
 
             markers = n_markers(cohort_stem + ".vcf.gz")
+            os.replace(dr2_tmp, dr2_out)
+            os.replace(patient_tmp + ".tbi", patient_out + ".tbi")
+            os.replace(patient_tmp, patient_out)
             entry.update({"status": "ok", "returncode": 0, "n_markers": markers})
-        except Failed as exc:
-            entry.update({"status": "FAILED", "failed_step": exc.step,
-                          "returncode": exc.returncode, "stderr_tail": exc.stderr[-2000:]})
+        except (Failed, OSError) as exc:
+            if isinstance(exc, Failed):
+                entry.update({"status": "FAILED", "failed_step": exc.step,
+                              "returncode": exc.returncode, "stderr_tail": exc.stderr[-2000:]})
+            else:
+                entry.update({"status": "FAILED", "failed_step": "filesystem",
+                              "returncode": None, "stderr_tail": str(exc)})
         finally:
             if cohort_index is not None and cohort_index.poll() is None:
                 cohort_index.wait()
+        if entry.get("status") != "ok":
+            # The cohort output of a failed chromosome may be cut short; it is not evidence of
+            # anything, and leaving it would look like a finished run's output.
+            for path in (cohort_stem + ".vcf.gz", cohort_stem + ".vcf.gz.tbi"):
+                if os.path.exists(path):
+                    os.remove(path)
         entry["seconds"] = round(time.time() - t0, 1)
         entry["step_seconds"] = dict(_TLS.steps)
         if not args.keep_work:
