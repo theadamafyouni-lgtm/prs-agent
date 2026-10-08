@@ -19,7 +19,7 @@ neither is the judgment core (`ARCH-4`), which is the contract every skill obeys
                                   ▼
      ┌──────────► 1. select (§7) ──────► 2. score (§8) ──────► 3. interpret (§9) ──► 4. report (§10)
      │                  │                     │                      │
-     └── reselect ──────┘  (SEL-12)           │                 BLOCKED on INT-1
+     └── reselect ──────┘  (SEL-12)           │            reference built on request
         next candidate    materially worse ───┘
 ```
 
@@ -65,14 +65,17 @@ imputation runs. So a candidate can look acceptable at select and prove worse on
 - **First acceptable wins.** Do not score every candidate and compare — that is selecting on the
   outcome.
 
-## What is blocked, and why that is not a failure
+## Where the reference comes from
 
-`interpret` and `report` cannot close until the reference distribution (`INT-1`) exists; it is
-being built separately. They are written against `interfaces/reference-distribution.md` with the
-reference stubbed. The stub **refuses**; it does not synthesise a distribution to make the
-pipeline run. Inventing one would be the `JC-2` violation the whole product exists to avoid.
+`interpret` needs a reference distribution (`INT-1`) built for this person: the same model, the
+same scored variants, a cohort genetically close to them. Nothing ships one. `interpret` asks the
+harness for it (`interfaces/reference-distribution.md`), and a separate provider builds it from
+1000 Genomes genotypes for that one request, or refuses with its reason. A refusal is a correct
+outcome (`INT-2`), and `report` still has something honest to say after one.
 
-`select` and `score` do not depend on it and run today.
+What never happens is a distribution made up to let the pipeline finish: no synthetic one, no
+borrowed one, no percentile approximated from published population figures. That would be the
+`JC-2` violation the whole product exists to avoid.
 
 ## Run artifacts
 
@@ -87,8 +90,8 @@ runs/slice-001/
   ancestry/           projection + the ancestry judgment
   select/             candidates, scoring files, the model choice and its gate
   score/              matching, imputation, coverage metrics, the score
-  interpret/          blocked until INT-1
-  report/             blocked until INT-1
+  interpret/          the reference request, the provider's artifact, the adapter's check, the placement
+  report/             the report judgment
 ```
 
 The ledger is the audit trail. Per `DATA-6` it buys traceability, not reproducibility: the
