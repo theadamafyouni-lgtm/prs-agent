@@ -103,7 +103,7 @@ python3 tools/impute_joint.py --run <RUN_ID> \
   --phase3-dir refdata/ancestry-ref/phase3 --map-dir refdata/maps \
   --typed-positions runs/<RUN_ID>/score/patient_typed_positions.tsv \
   --panel-dir refdata/panel-snv \
-  --chromosomes 1-22 --seed <the same seed> --threads 6 --xmx 8g \
+  --chromosomes 1-22 --seed <the same seed> --threads 6 --xmx 6g --parallel-chromosomes 2 \
   --out-dir runs/<RUN_ID>/score/imputed_joint
 ```
 
@@ -112,14 +112,18 @@ samples. Beagle drops your hold-out from it as it reads it (`excludesamples=`), 
 reference it imputes against is exactly `dr2_reference.txt`, and the tool checks that against
 Beagle's own sample counts on every chromosome. It gives byte-identical dosages and DR2 to
 rebuilding the reference per run, which is what happens without `--panel-dir` and is much slower.
+`--parallel-chromosomes 2` runs two chromosomes at once, each its own Beagle at `--threads`;
+that too gives byte-identical output to one at a time, and `--xmx 6g` is what lets two fit.
 
 **`--threads` is a scoring parameter, like the seed.** Beagle's output depends on its thread
 count as well as its seed: the same patient, cohort, seed and chromosome at 6 and at 8 threads
 gave different dosages at ~4% of chr22's positions, by up to 1.27. Use 6, and record it with the
 seed.
 
-**This is slow -- roughly 15-25 minutes per chromosome, so several hours for the genome.** That
-is the accuracy-over-speed choice and it is expected; do not take a faster path that skips it. It
+**This is slow -- roughly four hours for the genome on an 8-core box** (chr22 alone takes about
+4.5 minutes; running two chromosomes at a time cuts the total by about a quarter). Almost all of
+it is Beagle itself: the hold-out co-imputation that makes DR2 a measurement costs that.
+It is the accuracy-over-speed choice and it is expected; do not take a faster path that skips it. It
 writes one patient-only VCF per chromosome into `--out-dir`, which is what every stage after this
 reads, and the multi-sample cohort output into `--out-dir/cohort/`.
 
