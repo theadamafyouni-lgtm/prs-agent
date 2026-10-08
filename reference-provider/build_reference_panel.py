@@ -182,6 +182,18 @@ def main():
     ap.add_argument("--keep-work", action="store_true")
     args = ap.parse_args()
 
+    # Line-buffered, so progress and the error that ends a run land in a redirected log in
+    # the order they happened. Block-buffered, the error (stderr) was written at line 1 and
+    # the progress after it at exit, so a `tail` of the log showed "concatenating" forever.
+    sys.stdout.reconfigure(line_buffering=True)
+
+    # Checked before any work, because any other name built the whole panel and then died at
+    # the end. bcftools (1.19 here) finds a .tbi only beside a .vcf.gz name, so .vcf.bgz, .gz
+    # or no extension died at `bcftools index -n`. concat writes by the name's extension over
+    # -Oz, so .vcf or .bcf died one step earlier, at `bcftools index -t`.
+    if not args.out.endswith(".vcf.gz"):
+        die("--out must end in .vcf.gz (got %s): under any other name the panel is built "
+            "and then fails when bcftools indexes it" % args.out)
     if not os.path.exists(args.scoring):
         die("scoring file not found: %s" % args.scoring)
     work = args.workdir or (args.out + ".work")
