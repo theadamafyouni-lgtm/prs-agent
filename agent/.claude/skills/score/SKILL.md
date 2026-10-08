@@ -61,16 +61,27 @@ positions as failures. Measured on this build: solo imputation put ~68% of posit
 Three steps.
 
 **(a) The positions their file actually types.** The hold-out cohort is masked to these, so the
-cohort is genotyped as if on the same chip rather than carrying full sequence.
+cohort is genotyped as if on the same chip rather than carrying full sequence. **Called
+positions only**: a no-call is kept in the normalized VCF as a missing genotype, and if the
+hold-outs kept their genotypes there, the DR2 at that site would measure a cohort that was
+genotyped where this person was not, and overstate how well their value was recovered.
 
 ```bash
-bcftools query -f '%CHROM\t%POS\n' runs/<RUN_ID>/door/normalized.vcf.gz \
+mkdir -p runs/<RUN_ID>/score
+bcftools query -i 'GT!="mis"' -f '%CHROM\t%POS\n' runs/<RUN_ID>/door/normalized.vcf.gz \
   > runs/<RUN_ID>/score/patient_typed_positions.tsv
 ```
 
 **(b) The cohort split.** `--super-pop` is **your ancestry judgment**, read from `inferred_group`
 in `runs/<RUN_ID>/ancestry/ancestry.json` -- not a label the person gave you (`ANC-4`). Size and
 seed have no defaults and are yours to choose and record.
+
+The tool takes exactly one of the panel's own labels -- `AFR`, `AMR`, `EAS`, `EUR`, `SAS` -- and
+refuses anything else, including a qualified one ("EUR (predominant ...)"). Your ancestry call
+may be richer than that or in the HGDP+1kGP vocabulary the ancestry stage uses. `CSA` is broader
+than phase3's `SAS`, so passing `SAS` for it is a cohort choice you make and record, not a
+spelling fix; `MID` has no phase3 counterpart at all, so say that rather than picking a
+neighbour silently.
 
 ```bash
 python3 tools/build_dr2_cohort.py \
@@ -94,12 +105,28 @@ python3 tools/impute_joint.py --run <RUN_ID> \
   --reference-samples runs/<RUN_ID>/score/dr2/dr2_reference.txt \
   --phase3-dir refdata/ancestry-ref/phase3 --map-dir refdata/maps \
   --typed-positions runs/<RUN_ID>/score/patient_typed_positions.tsv \
-  --chromosomes 1-22 --seed <the same seed> --threads 6 --xmx 8g \
+  --panel-dir refdata/panel-snv \
+  --chromosomes 1-22 --seed <the same seed> --threads 6 --xmx 6g --parallel-chromosomes 2 \
   --out-dir runs/<RUN_ID>/score/imputed_joint
 ```
 
-**This is slow -- roughly 15-25 minutes per chromosome, so several hours for the genome.** That
-is the accuracy-over-speed choice and it is expected; do not take a faster path that skips it. It
+`--panel-dir` is the reference: the phase3 panel filtered once to biallelic SNVs, all 2,504
+samples. Beagle drops your hold-out from it as it reads it (`excludesamples=`), so the
+reference it imputes against is exactly `dr2_reference.txt`, and the tool checks that against
+Beagle's own sample counts on every chromosome. It gives byte-identical dosages and DR2 to
+rebuilding the reference per run, which is what happens without `--panel-dir` and is much slower.
+`--parallel-chromosomes 2` runs two chromosomes at once, each its own Beagle at `--threads`;
+that too gives byte-identical output to one at a time, and `--xmx 6g` is what lets two fit.
+
+**`--threads` is a scoring parameter, like the seed.** Beagle's output depends on its thread
+count as well as its seed: the same patient, cohort, seed and chromosome at 6 and at 8 threads
+gave different dosages at ~4% of chr22's positions, by up to 1.27. Use 6, and record it with the
+seed.
+
+**This is slow -- roughly four hours for the genome on an 8-core box** (chr22 alone takes about
+4.5 minutes; running two chromosomes at a time cuts the total by about a quarter). Almost all of
+it is Beagle itself: the hold-out co-imputation that makes DR2 a measurement costs that.
+It is the accuracy-over-speed choice and it is expected; do not take a faster path that skips it. It
 writes one patient-only VCF per chromosome into `--out-dir`, which is what every stage after this
 reads, and the multi-sample cohort output into `--out-dir/cohort/`.
 
@@ -116,30 +143,38 @@ reads, and the multi-sample cohort output into `--out-dir/cohort/`.
 >   > runs/<RUN_ID>/score/impute_joint.log 2>&1 &
 > ```
 >
-> Then poll. Each poll is a short command, so each one fits inside a tool call:
+> Then poll. Each poll waits a bounded time and then returns, so each one fits inside a tool
+> call. Give the Bash call a 600000 ms timeout (the default is 2 minutes); `timeout 540` makes
+> the command itself give up first:
 >
 > ```bash
-> sleep 600; ls runs/<RUN_ID>/score/imputed_joint/*.vcf.gz 2>/dev/null | grep -vc cohort
+> timeout 540 bash -c 'until [ -e runs/<RUN_ID>/score/imputed_joint/impute_joint.json ]; do sleep 20; done'; \
+>   ls runs/<RUN_ID>/score/imputed_joint/chr*.vcf.gz 2>/dev/null | wc -l
 > ```
+>
+> A bare long `sleep` (`sleep 600; ls ...`) is refused by the Claude Code CLI on this box
+> (2.1.293: "Foreground sleep is blocked"); the bounded `until` loop above is the form it runs.
 >
 > **It is done when `runs/<RUN_ID>/score/imputed_joint/impute_joint.json` exists** -- the tool
 > writes it once, at the end, and it carries `n_ok`, `n_failed` and `n_skipped`. Read those before
 > going on: a chromosome that failed is recorded there with its stderr rather than raised, so the
 > file existing is not by itself success.
 >
-> Poll on a long interval and keep going. Twenty or so polls at ten minutes each is the expected
-> shape of this stage, not a sign something is wrong. If the count stops advancing for several
-> polls, read the newest `chr<N>.beagle.log` in that directory before concluding anything.
+> Keep polling. A run of polls of nine minutes each is the expected shape of this stage, not a
+> sign something is wrong. The largest chromosomes run first, so the count normally stays at 0
+> for the first forty minutes or so. To tell slow from dead, check the process, not the
+> count: `pgrep -f impute_joint.py` and the tail of `runs/<RUN_ID>/score/impute_joint.log`.
+> `chr<N>.beagle.log` is written only when that chromosome's Beagle finishes.
 >
-> **Every poll must return. Never block waiting for a file.** A command like
-> `until [ -f .../chr4.vcf.gz ]; do sleep 900; done` looks strictly better than repeated short
-> polls, and it is what kills this stage. It blocks inside a single tool call, the call is cut
+> **Every poll must return. Never block waiting for a file without a bound.** A command like
+> `until [ -f .../chr4.vcf.gz ]; do sleep 900; done` with no `timeout` in front looks strictly
+> better than repeated short polls, and it is what kills this stage. It blocks inside a single tool call, the call is cut
 > off at the tool's own ceiling, and when the last such command dies your turn ends with it --
 > the harness reads that as the run finishing and tears the sandbox down over the still-running
 > job. On 2026-08-06 a run did precisely this: it armed four staged watchers, wrote "watchers
 > armed, standing by for imputation to complete", and lost the stage at chr2. The same applies
-> to `wait`, to `while [ ! -f ... ]`, and to any single `sleep` long enough to outlast a tool
-> call. Ten minutes returns. Fifteen might not.
+> to `wait`, to an unbounded `while [ ! -f ... ]`, and to any single `sleep` long enough to
+> outlast a tool call. The tool's ceiling is ten minutes; `timeout 540` keeps each poll under it.
 >
 > **The round-trips are not waste, and this is the trap.** Reasoning that repeated status checks
 > cost round-trips without changing anything is correct about the checks and wrong about what
@@ -167,12 +202,18 @@ and flow into the gate. Say so rather than letting them vanish.
 python3 tools/match_variants.py --run <RUN_ID> \
   --scorefile <the model file you downloaded> \
   --chr-col hm_chr --pos-col hm_pos --effect-allele-col effect_allele \
-  --other-allele-col hm_inferOtherAllele --effect-weight-col <as the header names it> \
+  --other-allele-col <as the header names it> --effect-weight-col <as the header names it> \
   --imputed-dir runs/<RUN_ID>/score/imputed_joint \
   --typed-vcf runs/<RUN_ID>/door/normalized.vcf.gz \
   --palindromic-policy <you choose> --r2-bar 0.80 \
   --out-dir runs/<RUN_ID>/score
 ```
+
+**Name the other-allele column the file actually fills.** Harmonized files can carry both
+`other_allele` and `hm_inferOtherAllele`, and either can be empty in every row — in some models
+`hm_inferOtherAllele` is blank throughout and `other_allele` holds the alleles. Pass an empty
+column and the tool silently matches on the effect allele alone. Check which one has values
+(the select stage's `scorefile_facts_<PGS>.json`, or `zcat | head`) and pass that one.
 
 **Every flip decision is recorded.** A silent flip during normalization would erase provenance,
 which is why strand is resolved at matching time rather than at conversion.

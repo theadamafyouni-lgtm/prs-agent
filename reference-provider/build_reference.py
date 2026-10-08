@@ -3,19 +3,21 @@
 build_reference.py -- reference distribution provider for the INT-1 interface.
 
 Builds a PRS reference distribution for ONE patient and ONE scoring model by
-scoring a genetically-similar slice of 1000 Genomes phase 3 on the patient's own
-resolved variant set, and emits the JSON artifact described in
-inputs/reference-distribution.md.
+scoring a genetically-similar slice of a reference panel with the patient's own
+resolved score input, and emits the JSON artifact described in CONTRACT.md.
 
 This is a separate provider. It does not import from, read from, or write into
 the agent repo. The agent consumes the artifact it did not produce.
 
 Steps:
-  1. Regenerate the plink score input from the resolved dosage rows joined to the
-     harmonized scoring file. Verified against a known sum of |beta|.
-  2. Select the k nearest reference samples in PC space.
-  3. Score them with plink2 on the patient's resolved set (same-resolved-set parity).
-  4. Emit the artifact.
+  1. Join the resolved dosage rows to the harmonized scoring file, for the model's
+     header, the typed/imputed split and an optional sum-of-|beta| regression guard,
+     and compare that join with the patient's own score input.
+  2. Select the k nearest reference samples in PC space, from the basis samples that
+     have genotypes in the reference VCF.
+  3. Score them with plink2 from the patient's own score input, by the recipe
+     score_plink2.py scored the patient with, and count what plink2 actually used.
+  4. Emit the artifact, with every cohort member's raw score.
 """
 
 import argparse
@@ -26,6 +28,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 
@@ -66,14 +69,12 @@ PURITY_KS = [50, 100, 150, 200, 250, 300, 350, 400, 500, 750, 1000]
 SLOPE_WINDOW = 1.6
 SLOPE_SCAN_MAX = 1200
 
-# Thresholds that select which verdict cohort_fit_note reports. They exist so the
-# note's prose follows from the measurement instead of being written around it: if
-# the numbers stop supporting a centrality disclosure, the code stops emitting one.
-# Percentiles are "share of the comparison group closer to the centroid / with a
-# tighter curve than the patient", so LOW means the patient is the extreme one.
-CENTRALITY_PCT_FLAG = 5.0
-CENTRALITY_PCT_WATCH = 15.0
-SHAPE_PCT_FLAG = 10.0
+# There are no verdict thresholds. cohort_fit_note used to pick "centrality effect
+# present" / "borderline" / "no centrality effect detected" against fixed percentile
+# cutoffs (5, 15 and 10), and that verdict decided whether a disclosure was made at all.
+# Where to draw those lines is a judgment an expert could make differently, and a tool
+# only extracts; the measurements are reported, and every comparative sentence is
+# emitted only when the inequality it states holds.
 
 
 # ----------------------------------------------------------------------------
@@ -355,22 +356,51 @@ def counts_text(counts):
                      sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
-def load_panel(path):
-    """Return {sample: (pop, super_pop)}."""
+def load_sample_labels(path):
+    """Return {sample: (pop, super_pop)} from the PCA basis's own sample_labels.json.
+
+    These are the labels ancestry.py wrote beside the basis and counted the agent's
+    nearest_reference_samples with, so they are the only labels under which the
+    self-check can reproduce that result. A sample with a null label is left out
+    here and caught by the every-sample-labelled check in main().
+    """
+    try:
+        with open(path, "r") as fh:
+            raw = json.load(fh)
+    except (OSError, ValueError) as exc:
+        die("sample labels unreadable at %s: %s" % (path, exc))
     labels = {}
-    with open(path, "r") as fh:
-        header = fh.readline().rstrip("\n").split("\t")
-        try:
-            i_s, i_p, i_sp = (header.index("sample"), header.index("pop"),
-                              header.index("super_pop"))
-        except ValueError:
-            die("panel file header missing sample/pop/super_pop; got %r" % (header,))
-        for line in fh:
-            if not line.strip():
-                continue
-            f = line.rstrip("\n").split("\t")
-            labels[f[i_s]] = (f[i_p], f[i_sp])
+    for s, v in raw.items():
+        v = v or {}
+        if v.get("pop") is not None and v.get("super_pop") is not None:
+            labels[s] = (v["pop"], v["super_pop"])
     return labels
+
+
+def vcf_header_facts(path):
+    """What the reference VCF says about itself, read off its own header.
+
+    The ##fileformat/##fileDate/##source/##reference lines, the FORMAT fields it
+    declares, and its samples in file order. Nothing is inferred: a line the header
+    does not carry is absent here.
+    """
+    opener = gzip.open if path.endswith(".gz") else open
+    meta, fmt = collections.OrderedDict(), []
+    with opener(path, "rt") as fh:
+        for line in fh:
+            if line.startswith("##"):
+                s = line[2:].rstrip("\n")
+                k, _, v = s.partition("=")
+                if k in ("fileformat", "fileDate", "source", "reference") and k not in meta:
+                    meta[k] = v
+                elif k == "FORMAT" and "ID=" in v:
+                    fmt.append(v.split("ID=", 1)[1].split(",", 1)[0])
+                continue
+            if line.startswith("#CHROM"):
+                return {"header_lines": meta, "format_ids": fmt,
+                        "samples": line.rstrip("\n").split("\t")[9:]}
+            break
+    die("reference VCF %s has no #CHROM header line" % path)
 
 
 def counts_for(iids, labels, idx):
@@ -555,6 +585,7 @@ def curve_diagnostics(d_sorted, sup_sorted, n_available, k):
     out["superpopulation_purity_by_k"] = purity
     first_other = next((i + 1 for i, g in enumerate(sup_sorted) if g != sup_sorted[0]),
                        None)
+    out["superpopulation_at_rank_1"] = sup_sorted[0] if sup_sorted else None
     out["last_k_single_superpopulation"] = (first_other - 1) if first_other else n_available
     out["first_rank_of_a_second_superpopulation"] = first_other
 
@@ -618,11 +649,9 @@ def metric_sensitivity(coords, patient_vec, order, k, sup_arr, src, eigenvals):
     out["trailing_pc_share_of_squared_distance_within_cohort"] = round(
         float(np.median(tail_share[sel])), 4)
     out["share_note"] = (
-        "Median share of squared distance contributed by PC%d and above. Panel-wide "
-        "the leading PCs still do real work, because they are what separates the "
-        "continental groups. Within the selected cohort they do almost none: at that "
-        "scale the neighbours are already alike on the leading PCs, so the ordering "
-        "is decided by the trailing ones." % (n_top + 1))
+        "Median share of squared distance contributed by PC%d and above, panel-wide and "
+        "within the selected cohort; the leading PCs contribute the rest%s."
+        % (n_top + 1, _share_comparison(out, n_top)))
 
     # Does the mixture survive weighting PCs by the variance they actually explain?
     dw = np.linalg.norm((coords - patient_vec) * np.sqrt(ev), axis=1)
@@ -730,9 +759,6 @@ def select_cohort(iids, coords, labels, patient_vec, k, min_cohort, max_kth_dist
 # STEP 3 -- score the cohort with plink2
 # ----------------------------------------------------------------------------
 
-COMPLEMENT = {"A": "T", "T": "A", "C": "G", "G": "C"}
-
-
 def run_plink2(plink2, argv, label):
     """Run plink2, echo the interesting log lines, die on failure."""
     cmd = [plink2] + argv
@@ -745,186 +771,81 @@ def run_plink2(plink2, argv, label):
     return proc.stdout or ""
 
 
-def import_reference(plink2, vcf, prefix):
-    """VCF -> pgen. IDs are chrom:pos:ref:alt, NOT chrom:pos.
+def read_score_input(path):
+    """The patient's own plink score input: a header line, then ID, EA, BETA.
 
-    '@:#' would collide at the positions carrying more than one record, and a
-    collision is exactly where a silent drop would happen. Making the ID unique
-    keeps every record addressable so the choice between them is made here,
-    explicitly, rather than by whichever tool deduplicates first.
+    Read exactly as plink2 is told to read it (`1 2 3 header`), whitespace split, so
+    a tab-separated file and a space-separated one parse the same.
+    -> ([ids in file order], {id: effect allele}, {id: |beta|})
     """
-    if os.path.exists(prefix + ".pgen") and os.path.exists(prefix + ".pvar"):
-        print("    reusing existing %s.pgen (delete to force re-import)" % prefix)
-        return
-    run_plink2(plink2, ["--vcf", vcf, "--set-all-var-ids", "@:#:$r:$a",
-                        "--new-id-max-allele-len", "1000",
-                        "--make-pgen", "--out", prefix], "VCF import")
-
-
-def read_pvar(path):
-    """(chrom,pos) -> [(id, ref, alt), ...] preserving file order."""
-    pmap = collections.defaultdict(list)
-    n = 0
+    ids, ea, abs_beta = [], {}, {}
     with open(path, "r") as fh:
-        cols = None
+        if not fh.readline().split():
+            die("score input %s has no header line" % path)
         for line in fh:
-            if line.startswith("##"):
+            f = line.split()
+            if not f:
                 continue
-            f = line.rstrip("\n").split("\t")
-            if line.startswith("#"):
-                cols = {name: i for i, name in enumerate(f)}
-                continue
-            if cols is None:
-                die("%s has no #CHROM header line" % path)
-            n += 1
-            pmap[variant_key(f[cols["#CHROM"]], f[cols["POS"]])].append(
-                (f[cols["ID"]], f[cols["REF"]], f[cols["ALT"]]))
-    return pmap, n
+            if len(f) < 3:
+                die("score input %s has a row with fewer than 3 columns: %r" % (path, line))
+            ids.append(f[0])
+            ea[f[0]] = f[1]
+            abs_beta[f[0]] = abs(float(f[2]))
+    return ids, ea, abs_beta
 
 
-def load_alleles_for(scoring_gz, wanted):
-    """{key: (effect_allele, other_allele)} for a small set of positions."""
-    out = {}
-    if not wanted:
-        return out
-    with gzip.open(scoring_gz, "rt") as fh:
-        header = None
-        for line in fh:
-            if line.startswith("#"):
-                continue
-            header = line.rstrip("\n").split("\t")
-            break
-        i_chr, i_pos = header.index(HM_CHR_COL), header.index(HM_POS_COL)
-        i_ea = header.index(EA_COL)
-        i_oa = header.index("other_allele") if "other_allele" in header else None
-        for line in fh:
-            f = line.rstrip("\n").split("\t")
-            key = variant_key(f[i_chr], f[i_pos])
-            if key in wanted:
-                out[key] = (f[i_ea], f[i_oa] if i_oa is not None else None)
-    return out
+def compare_score_inputs(rejoined_path, patient_ea):
+    """Step 1's join against the patient's own score input, by variant ID.
 
-
-def resolve_score_variants(score_input, pvar_map, scoring_gz, out_path):
-    """Parity check + explicit resolution of multi-record positions.
-
-    Rewrites the score file onto the reference's unique variant IDs. Every
-    variant that does not survive is counted and its weight recorded -- a
-    shortfall must be visible in the artifact, never silently absorbed.
-
-    Multi-record resolution, in order:
-      1. the record whose {REF,ALT} exactly equals the model's {EA,OA}
-      2. failing that, the record whose alleles merely contain EA
-      3. if neither leaves exactly one candidate, DROP and record it
+    Counts only. A differing effect allele at the same ID is what a strand flip made
+    at matching looks like: the join copies the scoring file's allele verbatim, the
+    score input carries the allele actually used.
     """
-    # First pass: which of our positions are multi-record? Only those need the
-    # other_allele, so we avoid holding 1.09M extra strings in memory.
-    multi_keys = set()
-    with open(score_input, "r") as fh:
+    rj_ea = {}
+    with open(rejoined_path, "r") as fh:
         fh.readline()
         for line in fh:
-            key = line.split(" ", 1)[0]
-            if len(pvar_map.get(key, ())) > 1:
-                multi_keys.add(key)
-    allele_map = load_alleles_for(scoring_gz, multi_keys)
-
-    acc = {
-        "n_emitted": 0,
-        "n_present_in_vcf": 0,
-        "n_missing_from_vcf": 0,
-        "n_multi_record_positions": 0,
-        "n_multi_resolved_by_exact_allele_match": 0,
-        "n_multi_resolved_by_effect_allele_only": 0,
-        "n_multi_dropped_unresolvable": 0,
-        "n_allele_mismatch": 0,
-        "n_allele_mismatch_strand_flip_only": 0,
-        "n_final_scored": 0,
+            f = line.split()
+            if f:
+                rj_ea[f[0]] = f[1]
+    both = set(rj_ea) & set(patient_ea)
+    return {
+        "n_in_step1_join": len(rj_ea),
+        "n_in_patient_score_input": len(patient_ea),
+        "n_in_both": len(both),
+        "n_only_in_step1_join": len(set(rj_ea) - both),
+        "n_only_in_patient_score_input": len(set(patient_ea) - both),
+        "n_in_both_with_a_different_effect_allele": sum(
+            1 for k in both if rj_ea[k] != patient_ea[k]),
+        "note": ("Step 1 joins the dosages file's resolved rows to the scoring file and is "
+                 "what the typed/imputed split and the |beta| sums are computed over. The "
+                 "cohort is scored from the patient's score input, not from this join, so "
+                 "any difference between the two sets is reported here rather than "
+                 "reconciled."),
     }
-    abs_beta_lost = []
-    missing_examples, mismatch_examples = [], []
-    multi_decisions = []
-
-    with open(score_input, "r") as fh, open(out_path, "w") as out:
-        fh.readline()
-        out.write("ID EA BETA\n")
-        for line in fh:
-            key, ea, beta = line.rstrip("\n").split(" ")
-            acc["n_emitted"] += 1
-            recs = pvar_map.get(key)
-
-            if not recs:
-                acc["n_missing_from_vcf"] += 1
-                abs_beta_lost.append(abs(float(beta)))
-                if len(missing_examples) < 10:
-                    missing_examples.append(key)
-                continue
-            acc["n_present_in_vcf"] += 1
-
-            if len(recs) == 1:
-                vid, ref, alt = recs[0]
-                if ea in (ref,) or ea in alt.split(","):
-                    out.write("%s %s %s\n" % (vid, ea, beta))
-                    acc["n_final_scored"] += 1
-                else:
-                    acc["n_allele_mismatch"] += 1
-                    abs_beta_lost.append(abs(float(beta)))
-                    flip = COMPLEMENT.get(ea)
-                    if flip and (flip == ref or flip in alt.split(",")):
-                        acc["n_allele_mismatch_strand_flip_only"] += 1
-                    if len(mismatch_examples) < 10:
-                        mismatch_examples.append((key, ea, ref, alt))
-                continue
-
-            # multi-record position
-            acc["n_multi_record_positions"] += 1
-            ea_m, oa_m = allele_map.get(key, (ea, None))
-            exact = [r for r in recs
-                     if oa_m is not None and {r[1], r[2]} == {ea_m, oa_m}]
-            loose = [r for r in recs if ea_m == r[1] or ea_m in r[2].split(",")]
-
-            chosen, how = None, None
-            if len(exact) == 1:
-                chosen, how = exact[0], "exact {EA,OA} == {REF,ALT} match"
-                acc["n_multi_resolved_by_exact_allele_match"] += 1
-            elif len(loose) == 1:
-                chosen, how = loose[0], "only record carrying the effect allele"
-                acc["n_multi_resolved_by_effect_allele_only"] += 1
-            else:
-                acc["n_multi_dropped_unresolvable"] += 1
-                abs_beta_lost.append(abs(float(beta)))
-                how = "DROPPED -- %d candidates matched, cannot choose" % len(loose)
-
-            multi_decisions.append({
-                "position": key,
-                "model_effect_allele": ea_m,
-                "model_other_allele": oa_m,
-                "records_present": ["%s (%s/%s)" % (r[0], r[1], r[2]) for r in recs],
-                "chosen": chosen[0] if chosen else None,
-                "rule_applied": how,
-                "abs_beta": abs(float(beta)),
-            })
-            if chosen:
-                out.write("%s %s %s\n" % (chosen[0], ea, beta))
-                acc["n_final_scored"] += 1
-
-    acc["sum_abs_beta_not_scored"] = math.fsum(abs_beta_lost)
-    acc["missing_examples"] = missing_examples
-    acc["allele_mismatch_examples"] = [
-        {"position": k, "model_ea": e, "vcf_ref": r, "vcf_alt": a}
-        for k, e, r, a in mismatch_examples]
-    acc["multi_record_decisions"] = multi_decisions
-    return acc
 
 
-def score_cohort(plink2, prefix, resolved_score, keep_path, sample_ids, out_prefix):
+def score_cohort(plink2, ref_vcf, score_input, keep_path, sample_ids, out_prefix):
+    """Score the cohort by the recipe score_plink2.py scores the patient with.
+
+    Same score input file, same variant IDs (@:#), the same duplicate and multiallelic
+    exclusions at import, the same `--score ... 1 2 3 header cols=+scoresums,+denom
+    no-mean-imputation`. The only additions are --keep, which selects the cohort, and
+    list-variants, which makes plink2 name the variants it actually used so the parity
+    count is plink2's own rather than an inference.
+    """
     with open(keep_path, "w") as fh:
         fh.write("#IID\n")
         for s in sample_ids:
             fh.write("%s\n" % s)
 
-    log = run_plink2(plink2, ["--pfile", prefix, "--keep", keep_path,
-                              "--score", resolved_score, "1", "2", "3", "header",
-                              "cols=+scoresums,+nallele",
+    log = run_plink2(plink2, ["--vcf", ref_vcf,
+                              "--set-all-var-ids", "@:#", "--rm-dup", "exclude-all",
+                              "--import-max-alleles", "2",
+                              "--keep", keep_path,
+                              "--score", score_input, "1", "2", "3", "header",
+                              "cols=+scoresums,+denom", "no-mean-imputation",
+                              "list-variants",
                               "--out", out_prefix], "scoring")
 
     # plink2's own count of what it actually used -- authoritative, not inferred
@@ -936,7 +857,24 @@ def score_cohort(plink2, prefix, resolved_score, keep_path, sample_ids, out_pref
                 if tok.isdigit():
                     n_processed = int(tok)
                     break
-    return log, n_processed
+    # plink2's own account of what it imported, dropped and used. Column 0 only: the
+    # indented lines are the echo of the options, and "--x: Nk variants ..." is progress.
+    # plink2 wraps a long warning onto unindented continuation lines, which are rejoined.
+    log_lines, prev = [], None
+    for ln in log.splitlines():
+        if ln.startswith(("--vcf:", "--score:", "--rm-dup", "Note:", "Warning")):
+            prev = None if re.match(r"--\S+: \d+k variants ", ln) else ln.strip()
+            if prev:
+                log_lines.append(prev)
+        elif prev and prev.startswith("Warning") and ln.strip() and not ln.startswith(" "):
+            log_lines[-1] = prev = prev + " " + ln.strip()
+        else:
+            prev = None
+    used = []
+    if os.path.exists(out_prefix + ".sscore.vars"):
+        with open(out_prefix + ".sscore.vars") as fh:
+            used = [ln.strip() for ln in fh if ln.strip()]
+    return log, n_processed, used, log_lines
 
 
 def read_sscore(path):
@@ -981,16 +919,13 @@ def summarise(scores):
 
 
 def _fit_assessment(cohort):
-    """Decide from the measurements whether a centrality effect is distorting cohort
-    selection, and write the paragraph that follows from THAT decision.
+    """The centrality and curve-shape measurements, as prose that asserts only what the
+    numbers show.
 
-    -> (verdict, prose)
-
-    The previous version of this function wrote one fixed argument and substituted
-    numbers into it. That is how it survived a sign change in its own data: the
-    conclusion was in the format string, so no measurement could dislodge it. This
-    one selects the conclusion first, against CENTRALITY_PCT_* / SHAPE_PCT_FLAG, and
-    can return "no effect detected" -- the outcome the old shape could not express.
+    It reaches no verdict. An earlier version picked one against fixed cutoffs, and before
+    that one fixed argument had numbers substituted into it; both put a conclusion in the
+    tool. Each comparative clause here is emitted only when the inequality it states holds
+    in this run's numbers.
     """
     cen = cohort["centrality"]
     curve = cohort["distance_curve"]
@@ -1007,28 +942,21 @@ def _fit_assessment(cohort):
     shape_src = shape["by_superpopulation"].get(src, {})
     shape_pct = shape_src.get("patient_percentile")
 
-    centrality_flagged = pct_central < CENTRALITY_PCT_FLAG
-    centrality_watch = pct_central < CENTRALITY_PCT_WATCH
-    shape_flagged = shape_pct is not None and shape_pct < SHAPE_PCT_FLAG
+    def rel(a, b):
+        return "below" if a < b else ("above" if a > b else "equal to")
 
-    if centrality_flagged:
-        verdict = "centrality effect present"
-    elif centrality_watch or shape_flagged:
-        verdict = "borderline -- see the numbers"
-    else:
-        verdict = "no centrality effect detected"
-
-    # --- part 1: what was tested, and the centrality answer -------------------
+    # --- part 1: what is measured, and centrality -----------------------------
     parts = [
-        "Two things can make a selected cohort look closer than it should. The "
-        "patient may sit at the centre of the reference cloud, where everything is "
-        "near; or the patient may sit inside a genuinely dense cluster, where the "
-        "closeness is real. Both are measured here rather than assumed. VERDICT: %s."
-        % verdict,
-        "Centrality: the patient's distance to the panel centroid is %.6f against a "
-        "panel median of %.6f (5th percentile %.6f, 95th %.6f). %.1f%% of the %d "
+        "Two things can make a selected cohort look closer than it should: the patient "
+        "may sit near the centre of the reference cloud, where everything is near, or "
+        "inside a dense cluster, where the closeness is real. The measurements below bear "
+        "on which; this tool reports them and reaches no verdict.",
+        "Centrality: the patient's distance to the panel centroid is %.6f, %s the panel "
+        "median of %.6f (5th percentile %.6f, 95th %.6f). %.1f%% of the %d "
         "reference samples are closer to the centroid than the patient%s."
         % (cen["patient_distance_to_centroid"],
+           rel(cen["patient_distance_to_centroid"],
+               cen["panel_median_distance_to_centroid"]),
            cen["panel_median_distance_to_centroid"],
            cen["panel_p5_distance_to_centroid"],
            cen["panel_p95_distance_to_centroid"],
@@ -1037,16 +965,6 @@ def _fit_assessment(cohort):
             ", and %.1f%% of %s -- the group supplying %d of the %d selected "
             "neighbours -- are" % (pct_central_src, src, src_n, cohort["n_selected"]))),
     ]
-    if centrality_flagged:
-        parts.append(
-            "That is an extreme position: the patient is more central than all but "
-            "%.1f%% of the panel, so the neighbours selected around them are closer "
-            "than their true genetic neighbourhood warrants." % pct_central)
-    else:
-        parts.append(
-            "That is an ordinary position inside the panel, not an extreme one, so "
-            "cohort selection is not being pulled in by a point sitting at the middle "
-            "of the reference cloud.")
 
     # --- part 2: the rank profile, and the baseline that makes it readable -----
     d1_meds = {g: by_sup[g]["d1"] for g in by_sup}
@@ -1055,75 +973,86 @@ def _fit_assessment(cohort):
     p1 = pvb.get(1, {}).get("percentile_vs_panel")
     p300 = pvb.get(300, {}).get("percentile_vs_panel")
     src_pct = pct_by_sup.get(src, {})
+    s1_, s300 = src_pct.get("d1"), src_pct.get("d300")
 
-    parts.append(
-        "Rank profile, against the whole panel: the patient runs from the %.1fth "
-        "percentile at d1 (distance %.6f) to the %.1fth at d300 (%.6f). Read alone "
-        "that looks like flattening. It is mostly the baseline. The all-panel "
-        "baseline mixes groups of very different density -- median d1 spans %.6f "
-        "(%s) to %.6f (%s) -- and its median d1 of %.6f sits BELOW %s's %.6f while "
-        "its median d300 of %.6f sits ABOVE %s's %.6f. A patient near %s is "
-        "therefore scored as loose at d1 and tight at d300 by the mixture alone."
-        % (p1, curve.get(1), p300, curve.get(300),
-           d1_meds[tightest], tightest, d1_meds[loosest], loosest,
-           panel_base[1]["median"], src, by_sup[src]["d1"],
-           panel_base[300]["median"], src, by_sup[src]["d300"], src))
+    flattening = p1 is not None and p300 is not None and p300 < p1
+    mixture = (panel_base[1]["median"] < by_sup[src]["d1"]
+               and panel_base[300]["median"] > by_sup[src]["d300"])
+    src_drift_smaller = (flattening and s1_ is not None and s300 is not None
+                         and abs(s1_ - s300) < abs(p1 - p300))
+
+    if p1 is not None and p300 is not None:
+        txt = ("Rank profile, against the whole panel: the patient runs from the %.1fth "
+               "percentile at d1 (distance %.6f) to the %.1fth at d300 (%.6f)."
+               % (p1, curve.get(1), p300, curve.get(300)))
+        if flattening:
+            txt += " The percentile falls from d1 to d300."
+        txt += (" Across groups the median d1 spans %.6f (%s) to %.6f (%s); the "
+                "all-panel median d1 of %.6f is %s %s's %.6f and its median d300 of "
+                "%.6f is %s %s's %.6f."
+                % (d1_meds[tightest], tightest, d1_meds[loosest], loosest,
+                   panel_base[1]["median"], rel(panel_base[1]["median"], by_sup[src]["d1"]),
+                   src, by_sup[src]["d1"],
+                   panel_base[300]["median"],
+                   rel(panel_base[300]["median"], by_sup[src]["d300"]),
+                   src, by_sup[src]["d300"]))
+        if mixture:
+            txt += (" A sample at %s's own median distances would therefore rank above "
+                    "the all-panel median at d1 and below it at d300." % src)
+        parts.append(txt)
 
     have = [(r, src_pct["d%d" % r]) for r in BASELINE_RANKS
             if src_pct.get("d%d" % r) is not None]
     prof = ", ".join("%.1fth at d%d" % (v, r) for r, v in have)
-    s1_, s300 = src_pct.get("d1"), src_pct.get("d300")
     if s1_ is not None and s300 is not None and p1 is not None and p300 is not None:
         tight_r, tight_v = min(have, key=lambda rv: rv[1])
-        parts.append(
-            "Against %s alone -- the only baseline the cohort is actually drawn from "
-            "-- the d1-to-d300 drift that the whole argument rests on nearly "
-            "vanishes: the %.1fth percentile at d1 and the %.1fth at d300, a move of "
-            "%.1f points where the all-panel baseline showed %.1f. Full profile: %s. "
-            "The patient's tightest point relative to %s is the %.1fth percentile at "
-            "d%d, and the profile returns to the middle of the group by d300. A point "
-            "sitting at the centre of the cloud looks nothing like this: its "
-            "percentile falls as rank rises and stays down, because the whole panel "
-            "keeps closing in on it."
-            % (src, s1_, s300, abs(s1_ - s300), abs(p1 - p300), prof, src,
-               tight_v, tight_r))
+        txt = ("Against %s alone -- the baseline the cohort is drawn from -- the patient "
+               "is the %.1fth percentile at d1 and the %.1fth at d300, a move of %.1f "
+               "points where the all-panel baseline showed %.1f%s. Full profile: %s. "
+               "The patient's lowest percentile against %s is the %.1fth, at d%d."
+               % (src, s1_, s300, abs(s1_ - s300), abs(p1 - p300),
+                  ", so the drift is smaller against the group than against the panel"
+                  if src_drift_smaller else "",
+                  prof, src, tight_v, tight_r))
+        if tight_r < 300 and s300 > tight_v:
+            txt += " After that rank the percentile rises again, to the %.1fth at d300." % s300
+        parts.append(txt)
     else:
         parts.append("Against %s alone the profile is: %s." % (src, prof))
 
     # --- part 3: the scale-free statistic -------------------------------------
-    parts.append(
-        "The scale-free statistic settles it, because a group simply being denser or "
-        "sparser than the panel cannot move it. Taking %s: the patient's is %.3f "
-        "against a %s median of %.3f, the %.1fth percentile of %s members' own "
-        "curves. %s"
-        % (shape["definition"], shape["patient"], src, shape_src.get("median"),
-           shape_pct, src,
-           ("The patient's neighbourhood has the same shape as an ordinary member of "
-            "the group the cohort comes from, which is what a fit looks like and is "
-            "not what a centrality artifact looks like."
-            if not shape_flagged else
-            "That is flatter than the group's own curves, which is the shape a "
-            "centrality artifact produces.")))
+    if shape.get("patient") is not None and shape_pct is not None:
+        parts.append(
+            "Scale-free statistic, %s -- a group being uniformly denser or sparser than "
+            "the panel does not move it: the patient's is %.3f, %s the %s median of %.3f; "
+            "%.1f%% of %s members have a smaller value than the patient's."
+            % (shape["definition"], shape["patient"],
+               rel(shape["patient"], shape_src.get("median")), src,
+               shape_src.get("median"), shape_pct, src))
+    else:
+        parts.append("The scale-free statistic (%s) was not computed for %s."
+                     % (shape["definition"], src))
 
     # --- part 4: guard the no-label stance ------------------------------------
     parts.append(
         "Naming %s here is a statement about which reference samples the cohort is "
-        "built from, not a group assignment for the patient. It appears because "
-        "using the all-panel baseline instead is what produces the false flattening "
-        "signal above. See ancestry_grouping_definition.why_no_label."
-        % src)
+        "built from, not a group assignment for the patient.%s See "
+        "ancestry_grouping_definition.why_no_label."
+        % (src, " It is named because the patient's percentile drifts less across ranks "
+                "against %s than against the all-panel baseline." % src
+           if src_drift_smaller else ""))
 
-    return verdict, " ".join(parts)
+    return " ".join(parts)
 
 
-def _why_this_k(cohort, args, fit_verdict):
-    """The k justification, rebuilt from the curve and composition measurements.
+def _why_this_k(cohort, args):
+    """What the curve and composition measurements say about the k the provider chose.
 
-    The previous version dismissed the distance curve as untrustworthy because of a
-    centrality effect recorded in cohort_fit_note. Whether that effect exists is now
-    decided per run, so this text branches on the current verdict instead of
-    assuming the answer -- and when the curve IS usable it has to say what the curve
-    actually shows, which is not the same as endorsing k.
+    It does not say why k was chosen. That reason is the provider's and is recorded
+    verbatim from --k-rationale beside this text; the previous version asserted "k was
+    chosen on COHORT COMPOSITION" in every branch, which this tool cannot know. Every
+    comparative clause is emitted only when the inequality it states holds in this
+    run's numbers.
     """
     diag = cohort["curve_diagnostics"]
     src = cohort["cohort_source_group"]
@@ -1136,77 +1065,105 @@ def _why_this_k(cohort, args, fit_verdict):
     bd = diag.get("boundary_degeneracy") or {}
     pure_k = diag["last_k_single_superpopulation"]
     first_other = diag["first_rank_of_a_second_superpopulation"]
+    first_sup = diag.get("superpopulation_at_rank_1")
 
     traj = ", ".join("%.1f%% at k=%d" % (purity[kk]["pct"], kk)
                      for kk in (350, 500, 1000) if kk in purity)
 
-    if fit_verdict != "no centrality effect detected":
-        head = (
-            "k was chosen on COHORT COMPOSITION, not on the distance curve. "
-            "cohort_fit_note records a centrality effect (%s), which compresses the "
-            "distances and makes them an untrustworthy basis for reading an elbow."
-            % fit_verdict)
-        upper = None
-    elif peak:
-        lo_b, hi_b = peak["band_within_95pct_of_peak"]
-        upper = max(hi_b, pure_k)
-        head = (
-            "k was chosen on COHORT COMPOSITION, and the distance curve now "
-            "corroborates that choice rather than being set aside for it. "
-            "cohort_fit_note measured the centrality effect that would compress the "
-            "curve and found none, so the curve can be read. Its log-log slope rises "
-            "from %.3f at d10 to a peak of %.3f at rank %d and falls away after -- "
-            "the rank where distance climbs fastest, which is where the patient's "
-            "local neighbourhood runs out. Ranks %d-%d are within 5%% of that peak. "
-            "Composition puts the same edge in nearly the same place: the cohort is "
-            "entirely %s through k=%d and the first neighbour from a second "
-            "superpopulation arrives at rank %s. Those are independent readings -- "
-            "one from distances, one from panel labels -- and they land within a few "
-            "dozen ranks of each other, which is the corroboration neither gives on "
-            "its own and the reason the curve is quoted here at all."
-            % (slope.get("d10", float("nan")), peak["slope"], peak["rank"],
-               lo_b, hi_b, src, pure_k, first_other))
+    parts = ["What the measurements show about k=%d. Why k was chosen is the "
+             "provider's statement, recorded in k_rationale_stated_by_provider; this "
+             "text does not supply one." % k]
+    band = None
+    if peak:
+        band = peak["band_within_95pct_of_peak"]
+        at_edge = peak["rank"] in (peak["scan_range"][0], peak["scan_range"][1] - 1)
+        d10 = slope.get("d10")
+        parts.append(
+            "The distance curve's log-log slope %s a peak of %.3f at rank %d%s. Ranks "
+            "%d-%d are within 5%% of that peak. Whether the patient's position compresses "
+            "this curve is not judged here; cohort_fit_note carries the centrality and "
+            "curve-shape measurements that bear on it."
+            % (("rises from %.3f at d10 to" % d10) if d10 is not None and d10 < peak["slope"]
+               else "reaches",
+               peak["slope"], peak["rank"],
+               " -- at the edge of the scanned range" if at_edge else
+               ", the rank where distance climbs fastest in the scanned range",
+               band[0], band[1]))
     else:
-        upper = pure_k
-        head = (
-            "k was chosen on COHORT COMPOSITION. cohort_fit_note finds no centrality "
-            "effect compressing the distance curve, but no slope peak could be "
-            "located in it, so the curve is not doing any work in this choice.")
+        parts.append("No slope peak could be located in the distance curve.")
 
-    body = (
-        "Composition past that point degrades steadily rather than cliff-edging: at "
-        "k=%d the cohort is %d/%d (%.1f%%) %s; it is %s."
-        % (k, n_src, n_sel, 100.0 * n_src / n_sel, src, traj))
+    if first_other is None:
+        parts.append("Every measured rank is %s; no second superpopulation appears."
+                     % first_sup)
+    else:
+        txt = ("The cohort is entirely %s through k=%d and the first neighbour from a "
+               "second superpopulation arrives at rank %d." % (first_sup, pure_k, first_other))
+        if band is not None:
+            if band[0] <= first_other <= band[1]:
+                txt += (" That rank falls inside the slope band, so the two independent "
+                        "readings -- one from distances, one from panel labels -- put "
+                        "the edge in the same place.")
+            else:
+                txt += (" That rank falls outside the slope band (%d-%d), so the two "
+                        "readings do not put the edge in the same place." % tuple(band))
+        parts.append(txt)
 
-    tail = (
-        "k=%d sits past both readings -- %d ranks beyond the purity break at %d%s -- "
-        "and buys cohort size (%.1fx the --min-cohort floor of %d, and a percentile "
-        "estimate resting on %d scores rather than %d) at the cost of admitting the "
-        "first samples from beyond the local neighbourhood. That is the trade, and "
-        "the measurements do not make it: read strictly off either indicator, k would "
-        "fall between %d and %d."
-        % (k, k - pure_k, pure_k,
-           ("" if not peak else
-            " and %d beyond the top of the slope band at %d"
-            % (k - peak["band_within_95pct_of_peak"][1],
-               peak["band_within_95pct_of_peak"][1])),
-           float(n_sel) / args.min_cohort, args.min_cohort, n_sel, pure_k,
-           min(pure_k, upper or pure_k), max(pure_k, upper or pure_k)))
+    parts.append(
+        "At k=%d the cohort is %d/%d (%.1f%%) %s; the largest superpopulation's share is "
+        "%s." % (k, n_src, n_sel, 100.0 * n_src / n_sel, src, traj or "not measured"))
 
-    if bd.get("median_gap_within_50_ranks"):
-        tail += (
-            " The boundary is also near-degenerate: d%d is %.6f and d%d is %.6f, a "
-            "gap of %.2e against a local median gap of %.2e, so which samples fall "
-            "just inside the cohort is set by the choice of an integer k rather than "
-            "by any separation in the data. Read "
-            "selected_cohort_superpopulation_counts with that in mind."
-            % (k, bd["d_k"], k + 1, bd["d_k_plus_1"], bd["gap_at_boundary"],
-               bd["median_gap_within_50_ranks"]))
+    if first_other is not None and k > pure_k:
+        parts.append(
+            "k=%d is %d ranks beyond the last single-superpopulation rank (%d), so the "
+            "cohort admits %d sample(s) from outside %s; cutting at %d instead would rest "
+            "the distribution on %d scores rather than %d. Which way to make that trade "
+            "is not something these measurements decide."
+            % (k, k - pure_k, pure_k, n_sel - n_src, src, pure_k, pure_k, n_sel))
+    else:
+        parts.append("k=%d is within the single-superpopulation range." % k)
+    if band is not None:
+        if k > band[1]:
+            parts.append("It is %d ranks beyond the top of the slope band (%d)."
+                         % (k - band[1], band[1]))
+        elif k < band[0]:
+            parts.append("It is %d ranks short of the bottom of the slope band (%d)."
+                         % (band[0] - k, band[0]))
+        else:
+            parts.append("It falls inside the slope band.")
+    parts.append("The cohort is %.1fx the --min-cohort floor of %d."
+                 % (float(n_sel) / args.min_cohort, args.min_cohort))
 
-    return " ".join([head, body, tail])
+    mg = bd.get("median_gap_within_50_ranks")
+    if mg is not None and bd["gap_at_boundary"] <= mg:
+        parts.append(
+            "The boundary is near-degenerate: d%d is %.6f and d%d is %.6f, a gap of "
+            "%.2e against a local median gap of %.2e, so which samples fall just inside "
+            "the cohort is set by the choice of an integer k rather than by any "
+            "separation in the data. Read selected_cohort_superpopulation_counts with "
+            "that in mind."
+            % (n_sel, bd["d_k"], n_sel + 1, bd["d_k_plus_1"], bd["gap_at_boundary"], mg))
+
+    return " ".join(parts)
 
 
-def build_artifact(args, projection, s1, cohort, parity, score_stats,
+def _share_comparison(ms, n_top):
+    """The clause comparing the trailing PCs' share of squared distance inside the cohort
+    with panel-wide, worded as the two numbers actually order, or nothing if equal."""
+    w = ms["trailing_pc_share_of_squared_distance_within_cohort"]
+    p = ms["trailing_pc_share_of_squared_distance_panel_wide"]
+    if w == p:
+        return ""
+    return (", so PC%d and above carry %s of the squared distance inside the cohort than "
+            "across the panel" % (n_top + 1, "more" if w > p else "less"))
+
+
+def _d1_spread(by_sup):
+    """max/min of the per-group median d1 -- the ratio baseline_frame_note quotes."""
+    d1 = [v["d1"] for v in by_sup.values() if v.get("d1")]
+    return (max(d1) / min(d1)) if d1 else float("nan")
+
+
+def build_artifact(args, projection, request, s1, cohort, parity, score_stats,
                    scoring_sha256, plink2_version):
     usable = not cohort["refusals"]
     reason = ("a usable reference distribution was built"
@@ -1216,12 +1173,10 @@ def build_artifact(args, projection, s1, cohort, parity, score_stats,
     nd = cohort["neighbour_distances"]
     curve = cohort["distance_curve"]
 
-    # Decided once, up here, because both cohort_construction_rule.why_this_k and
-    # cohort_fit_note are written from it. The two contradicted each other in an
-    # earlier build -- why_this_k asserted a centrality effect that cohort_fit_note's
-    # own numbers no longer showed -- and sharing one verdict is what stops that
-    # recurring.
-    verdict, assessment = _fit_assessment(cohort)
+    assessment = _fit_assessment(cohort)
+    first_other = cohort["curve_diagnostics"]["first_rank_of_a_second_superpopulation"]
+    anc_group = (((request.get("patient") or {}).get("ancestry_grouping") or {})
+                 .get("group"))
 
     eigenvals = cohort.get("eigenvals")
     if not (eigenvals and eigenvals[-1]):
@@ -1269,54 +1224,75 @@ def build_artifact(args, projection, s1, cohort, parity, score_stats,
                 "difference is visible rather than resolved silently.",
     }
 
-    art["source"] = ("1000 Genomes phase 3 (Beagle-distributed v5a reference panel), "
-                     "2,504 samples, GRCh37")
-    art["version_string"] = "1kg.phase3.v5a.b37"
+    # Read off the inputs, never written in. The previous strings named one panel
+    # release and one sample count, and would have gone on naming them whatever VCF
+    # and basis were passed.
+    vh = cohort["ref_vcf"]
+    hl = vh["header_lines"]
+    pool = cohort["candidate_pool"]
+    art["source"] = (
+        "reference genotypes: %s (%d samples; header ##source=%s, ##fileDate=%s); "
+        "cohort selected in the PCA basis built by %s from %s, labelled from %s"
+        % (os.path.basename(args.ref_vcf), len(vh["samples"]),
+           hl.get("source", "not stated"), hl.get("fileDate", "not stated"),
+           rb.get("tool"), rb.get("reference_source"), rb.get("panel_file")))
+    art["source_detail"] = {
+        "reference_vcf": os.path.basename(args.ref_vcf),
+        "reference_vcf_header_lines": hl,
+        "reference_vcf_n_samples": len(vh["samples"]),
+        "reference_vcf_build_record": cohort.get("ref_vcf_provenance"),
+        "pca_basis_reference_build": rb,
+        "candidate_pool": pool,
+    }
+    art["version_string"] = ("; ".join("##%s=%s" % (k_, hl[k_]) for k_ in
+                                       ("source", "fileDate", "reference") if k_ in hl)
+                             or None)
     art["version_string_note"] = (
-        "1000 Genomes release identifier, supplied as the equivalent of the All of "
-        "Us CDR string the contract names. The PCA sample set derives from "
-        "integrated_call_samples_v3.20130502.")
+        "The reference VCF's own ##source, ##fileDate and ##reference header lines, "
+        "verbatim. This tool supplies no release identifier of its own; null means the "
+        "header carried none of them.")
 
     art["ancestry_grouping_definition"] = {
         "grouping": "none -- continuous position in PC space, no discrete label",
-        "method": ("20-PC projection of the patient into a 1000 Genomes phase 3 PCA "
-                   "(%s markers after pruning), then k-nearest-neighbour selection by "
-                   "Euclidean distance in that 20-PC space. No population label is "
-                   "assigned to the patient by this provider."
-                   % rb.get("n_markers_after_pruning")),
+        "method": ("%s-PC projection of the patient into the PCA basis %s built from %s "
+                   "(%s markers after pruning, %s basis samples), then k-nearest-neighbour "
+                   "selection by Euclidean distance in that %s-PC space, over the "
+                   "candidate pool in cohort_construction_rule.candidate_pool. No "
+                   "population label is assigned to the patient by this provider."
+                   % (projection.get("pcs_used"), rb.get("tool"),
+                      rb.get("reference_source"), rb.get("n_markers_after_pruning"),
+                      rb.get("n_reference_samples"), projection.get("pcs_used"))),
         "pc_vector_used": ("patient_pcs_adp_corrected" if args.pc_source == "adp"
                            else "patient_pcs_simple_projection"),
         "pcs_used": projection.get("pcs_used"),
         "distance_metric_note": (
             ("Euclidean distance over %d PCs weights every PC equally: the plink2 "
-             "eigenvector columns are all normalised to the same variance, so a PC "
-             "explaining almost nothing counts as much as one separating continents. "
-             "The %d leading PCs hold %.0f%% of the eigenvalue mass, and PC1 is %.0fx "
-             "PC%d -- yet inside the selected cohort those leading PCs do almost no "
-             "ordering work: PC%d and above carry %.1f%% of the squared distance "
-             "there, against %.1f%% panel-wide. At cohort scale the neighbours are "
-             "already alike on the PCs that carry ancestry, so what separates them is "
-             "the rest. This is a pre-existing property of the rule, unchanged by the "
-             "upstream scale fix."
+             "eigenvector columns are all normalised to the same variance, whatever "
+             "share of the variance each PC explains. The %d leading PCs hold %.0f%% of "
+             "the eigenvalue mass, and PC1's eigenvalue is %.0fx PC%d's. PC%d and above "
+             "carry a median %.1f%% of the squared distance within the selected cohort, "
+             "against %.1f%% panel-wide%s."
              % (projection.get("pcs_used"), ms_n_top, 100.0 * ms["leading_pc_eigenvalue_share"],
                 eigenvals[0] / eigenvals[-1], projection.get("pcs_used"),
                 ms_n_top + 1,
                 100.0 * ms["trailing_pc_share_of_squared_distance_within_cohort"],
-                100.0 * ms["trailing_pc_share_of_squared_distance_panel_wide"]))
+                100.0 * ms["trailing_pc_share_of_squared_distance_panel_wide"],
+                _share_comparison(ms, ms_n_top)))
             if ms else
             ("Euclidean distance over %d PCs weights every PC equally. The reference "
              "eigenvalues were not available to quantify how unevenly the variance is "
              "spread across them." % (projection.get("pcs_used") or 0))),
         "cohort_composition_note": (
+            ("The selected cohort is a single superpopulation: %s."
+             % counts_text(cohort["superpopulation_counts"]))
+            if len(cohort["superpopulation_counts"]) <= 1 else
             ("The selected cohort is not superpopulation-homogeneous: %s. That is "
              "what a distance rule produces, not a defect in it -- the rule takes "
-             "whoever is nearest and never promised a single group. But the mixture "
-             "is an artifact of the metric rather than a finding about the patient, "
-             "and that is measured, not assumed: re-running the same k with each PC "
-             "weighted by the variance it explains gives %s, and %d of the %d members "
-             "from outside %s survive. A count that survives both weightings would be "
-             "a fact about where the patient sits; one that does not is a fact about "
-             "how the distance is defined. See distance_metric_note."
+             "whoever is nearest and never promised a single group. Re-running the "
+             "same k with each PC weighted by the variance it explains gives %s, and "
+             "%d of the %d members from outside %s survive. A count that survives both "
+             "weightings is a fact about where the patient sits; one that does not is a "
+             "fact about how the distance is defined. See distance_metric_note."
              % (counts_text(cohort["superpopulation_counts"]),
                 counts_text(ms["eigenvalue_weighted_recheck"]["superpopulation_counts"]),
                 ms["eigenvalue_weighted_recheck"]["n_of_those_still_selected_under_eigenvalue_weighting"],
@@ -1330,8 +1306,10 @@ def build_artifact(args, projection, s1, cohort, parity, score_stats,
              "is inferred here." % counts_text(cohort["superpopulation_counts"]))),
         "metric_sensitivity": ms,
         "why_no_label": (
-            "The upstream ancestry stage DID assign a group for this patient, and the "
-            "interpret request carried it here. This provider declines to use it. "
+            ("The upstream ancestry stage assigned a group for this patient (%r), and "
+             "the interpret request carried it here. This provider declines to use it. "
+             % anc_group if anc_group else
+             "The interpret request carries no upstream group for this patient. ") +
             "Selection is by distance in PC space alone: no sample is included or "
             "excluded by its panel label, and this artifact attaches no label to the "
             "patient. The contract's INT-5 / 17.2 fork permits a distance rule in "
@@ -1339,24 +1317,19 @@ def build_artifact(args, projection, s1, cohort, parity, score_stats,
             "cohort -- a label rule draws from every panel member carrying the label "
             "however far away they sit, while this rule takes the nearest %d and lets "
             "the labels fall where they may -- which is exactly why the resulting "
-            "neighbour counts must not be read back as a label. Two measured facts "
-            "make them particularly unsafe to read that way. Members from outside the "
-            "largest group enter only in the outer part of the cohort -- the first at "
-            "rank %s of %d -- and the distances there are near-degenerate, so moving "
-            "k by a handful of samples changes the mixture (see "
-            "cohort_construction_rule.why_this_k). And the ordering that puts them "
-            "there is dominated by low-variance PCs, per distance_metric_note and the "
-            "recheck in metric_sensitivity. The mixture is a fact about the metric "
-            "and about where an integer k cuts a near-continuous ordering, not a "
-            "finding about this patient's ancestry. One place the panel's labels DO "
-            "enter is the choice of k itself, which was sized partly on cohort "
-            "composition (see cohort_construction_rule.why_this_k). That sets a "
-            "boundary, not a label: no sample is included or excluded by its label, "
-            "no label is attached to the patient, and the selection rule remains "
-            "distance. It is recorded here rather than left implicit."
+            "neighbour counts must not be read back as a label.%s The panel's labels "
+            "can still enter through the choice of k, if k was sized on cohort "
+            "composition; whether it was is the provider's statement in "
+            "cohort_construction_rule.k_rationale_stated_by_provider. That would set a "
+            "boundary, not a label: no sample is included or excluded by its label, no "
+            "label is attached to the patient, and the selection rule remains distance."
             % (cohort["n_selected"],
-               cohort["curve_diagnostics"]["first_rank_of_a_second_superpopulation"],
-               cohort["n_selected"])),
+               (" Members from outside the largest group enter only in the outer part "
+                "of the cohort -- the first at rank %d of %d -- so moving k changes the "
+                "mixture; see cohort_construction_rule.why_this_k and "
+                "metric_sensitivity." % (first_other, cohort["n_selected"]))
+               if first_other is not None and first_other <= cohort["n_selected"]
+               else "")),
         "k": cohort["k_requested"],
         "selected_cohort_superpopulation_counts": cohort["superpopulation_counts"],
         "versioned_record_note": (
@@ -1372,13 +1345,16 @@ def build_artifact(args, projection, s1, cohort, parity, score_stats,
     }
 
     art["cohort_construction_rule"] = {
-        "rule": ("k-nearest neighbours in 20-PC space by Euclidean distance, k=%d, "
-                 "selected from all %d reference samples"
-                 % (cohort["k_requested"], cohort["n_available"])),
+        "rule": ("k-nearest neighbours in %s-PC space by Euclidean distance, k=%d, "
+                 "selected from the %d samples of the candidate pool"
+                 % (projection.get("pcs_used"), cohort["k_requested"],
+                    cohort["n_available"])),
+        "candidate_pool": pool,
         "k": cohort["k_requested"],
         "min_cohort_threshold": args.min_cohort,
         "max_kth_distance_threshold": args.max_kth_distance,
-        "why_this_k": _why_this_k(cohort, args, verdict),
+        "k_rationale_stated_by_provider": args.k_rationale,
+        "why_this_k": _why_this_k(cohort, args),
         "neighbour_distances": {"d1": nd["d1"], "d10": nd["d10"],
                                 "d50": nd["d50"],
                                 "d%d" % nd["k_for_dk"]: nd["dk"]},
@@ -1392,43 +1368,73 @@ def build_artifact(args, projection, s1, cohort, parity, score_stats,
     art["n_participants"] = score_stats.get("n_scored", 0)
     art["too_few_threshold_used"] = args.min_cohort
     art["too_few_threshold_note"] = (
-        "With %d reference samples always available and k=%d, this count-based "
-        "threshold cannot bind; it fires only on misconfiguration. The live "
-        "refusal lever for similarity is --max-kth-distance, set to %s for this "
-        "run." % (cohort["n_available"], cohort["k_requested"],
-                  args.max_kth_distance if args.max_kth_distance is not None
+        ("With %d samples in the candidate pool and k=%d, this count-based threshold "
+         "cannot bind; it fires only on misconfiguration. "
+         % (cohort["n_available"], cohort["k_requested"])
+         if cohort["n_available"] >= args.min_cohort and
+         cohort["k_requested"] >= args.min_cohort else "") +
+        "The refusal lever for similarity is --max-kth-distance, set to %s for this "
+        "run." % (args.max_kth_distance if args.max_kth_distance is not None
                   else "no check"))
 
+    # The patient side is read off the request and the dosages file; the reference side
+    # is the provider's own statement, because no VCF field says what assay produced it.
+    # Neither is written in here, which is what the previous fixed strings did.
+    rp = request.get("patient") or {}
+    patient_assay = rp.get("assay_class")
     art["assay_layer"] = {
-        "reference": "1000 Genomes phase 3 whole-genome sequencing, hard-called genotypes",
-        "patient": "consumer genotyping array, imputed",
-        "assay_matched": False,
+        "reference": args.reference_assay,
+        "reference_stated_by": "the provider, via --reference-assay",
+        "reference_vcf_format_fields": vh["format_ids"],
+        "patient": {
+            "assay_class": patient_assay,
+            "vendor": rp.get("vendor"),
+            "chip_generation": rp.get("chip_generation"),
+            "n_resolved_variants_typed": s1["n_variants_typed"],
+            "n_resolved_variants_imputed": s1["n_variants_imputed"],
+            "read_from": "the request's patient block, and the source column of the "
+                         "dosages file",
+        },
+        # Not decided here. One side is the provider's free text and the other the
+        # request's class token; whether they name the same assay layer is a judgment,
+        # and comparing the strings would make it by spelling.
+        "assay_matched": None,
+        "assay_matched_note": ("not decided by this tool; reference_adapter.py takes only "
+                               "a provider's own true/false here as a statement"),
         "statement": (
-            "These are NOT assay-matched. The reference is WGS-derived; the "
-            "patient's data is array-derived and imputed. INT-4 argues for an "
-            "array-derived reference specifically because an array-derived score "
-            "placed against a WGS reference inherits the R1 imputed/partial-"
-            "vs-complete bias. 1000 Genomes has no comparable array layer, so that "
-            "protection is not available here and the mismatch is disclosed rather "
-            "than corrected. See also imputation_shrinkage_note."),
+            "The reference assay is stated by the provider as %r; the patient's assay "
+            "class, from the request, is %r. INT-4 asks for a reference on the patient's "
+            "assay layer because a score from one layer placed against another inherits "
+            "the R1 imputed/partial-vs-complete bias. Whether these are the same layer is "
+            "not judged here, and nothing is corrected. See also "
+            "imputation_shrinkage_note." % (args.reference_assay, patient_assay)),
     }
 
-    art["scoring_parity"] = "same-resolved-set"
+    # same-resolved-set is a claim that the cohort was scored over exactly the variants
+    # the patient's own score used. It is made only when every count that could show
+    # otherwise agrees; anything short of that is `other`, with the counts.
+    art["scoring_parity"] = parity["label"]
     art["scoring_parity_detail"] = {
-        "statement": ("Reference individuals were scored over the same positions "
-                      "the patient resolved, not over the full model."),
+        "statement": parity["statement"],
+        "score_input": os.path.basename(args.score_input),
+        "score_input_sha256": parity["score_input_sha256"],
+        "score_input_sha256_in_request": parity["score_input_sha256_in_request"],
+        "scoring_recipe": parity["recipe"],
+        "n_variants_in_score_input": parity["n_given"],
+        "n_variants_plink2_used_for_reference": parity["n_reference_used"],
+        "n_variants_patient_scoring_used": parity["n_patient_used"],
+        "n_variants_in_patient_score_input_per_request": parity["n_patient_given"],
+        "plink2_version_patient_per_request": parity["plink2_patient"],
+        "n_score_input_variants_not_scored_in_reference": parity["n_not_scored"],
+        "sum_abs_beta_not_scored_in_reference": parity["sum_abs_beta_not_scored"],
+        "not_scored_examples": parity["not_scored_examples"],
+        "plink2_log_lines": parity["log_lines"],
+        "reference_allele_ct_min_max": parity["allele_ct_min_max"],
+        "step1_join_vs_score_input": s1.get("vs_score_input"),
         "n_model_variants": s1["n_scoring_file_rows"],
         "n_patient_resolved": s1["n_resolved_positions"],
-        "n_variants_in_score_file": s1["n_variants_emitted"],
         "sum_abs_beta": round(s1["sum_abs_beta"], 6),
         "sum_abs_beta_verified_against": s1["expected_sum_abs_beta"],
-        "n_present_in_reference_vcf": parity["n_present_in_vcf"],
-        "n_missing_from_reference_vcf": parity["n_missing_from_vcf"],
-        "n_allele_mismatch": parity["n_allele_mismatch"],
-        "n_allele_mismatch_strand_flip_only": parity["n_allele_mismatch_strand_flip_only"],
-        "n_variants_plink2_processed": score_stats.get("n_processed"),
-        "sum_abs_beta_not_scored": round(parity["sum_abs_beta_not_scored"], 8),
-        "parity_shortfall": (s1["n_variants_emitted"] - (score_stats.get("n_processed") or 0)),
         "scoring_tool": plink2_version,
         "score_convention": (
             "distribution reports SCORE1_SUM, the dosage-weighted sum of effect "
@@ -1439,68 +1445,61 @@ def build_artifact(args, projection, s1, cohort, parity, score_stats,
     }
 
     art["multiallelic_handling"] = {
-        "n_positions_with_multiple_reference_records": parity["n_multi_record_positions"],
         "decision_rule": (
-            "Reference variant IDs were set to chrom:pos:ref:alt rather than "
-            "chrom:pos, so co-located records stay individually addressable and no "
-            "tool silently deduplicates them. At each such position the record "
-            "whose {REF,ALT} exactly equals the model's {effect_allele, "
-            "other_allele} was selected. A position that did not resolve to exactly "
-            "one candidate would have been dropped and counted, not guessed."),
-        "n_resolved_by_exact_allele_match": parity["n_multi_resolved_by_exact_allele_match"],
-        "n_resolved_by_effect_allele_only": parity["n_multi_resolved_by_effect_allele_only"],
-        "n_dropped_unresolvable": parity["n_multi_dropped_unresolvable"],
-        "decisions": parity["multi_record_decisions"],
+            "The patient's rule, applied unchanged: variant IDs set to chrom:pos, every "
+            "duplicated ID removed (--rm-dup exclude-all) and records with more than two "
+            "alleles excluded at import (--import-max-alleles 2), as score_plink2.py "
+            "does for the patient. A position the reference holds more than one record "
+            "at is therefore not scored for the cohort, and it is counted in "
+            "scoring_parity_detail rather than resolved here."),
+        "plink2_log_lines": parity["log_lines"],
     }
 
+    imputed_any = bool(s1["sum_abs_beta_imputed"])
     art["imputation_shrinkage_note"] = {
         "statement": (
-            "%.4f of the patient's %.4f resolved |beta| (%.0f%%) comes from imputed "
-            "rather than directly typed positions. Imputation pulls those dosages "
-            "toward the reference panel's allele frequencies, which biases the "
-            "patient's percentile toward the centre of the distribution."
-            % (s1["sum_abs_beta_imputed"], s1["sum_abs_beta"],
-               100.0 * s1["imputed_weight_fraction"])),
+            ("%.4f of the patient's %.4f resolved |beta| (%.0f%%) comes from imputed "
+             "rather than directly typed positions. Imputed dosages are expected values "
+             "from the imputation, not observed genotypes. Whether that moves this "
+             "patient's placement, in which direction and by how much, depends on how the "
+             "reference genotypes were produced (assay_layer) and is not measured here."
+             % (s1["sum_abs_beta_imputed"], s1["sum_abs_beta"],
+                100.0 * s1["imputed_weight_fraction"]))
+            if imputed_any else
+            "None of the patient's resolved |beta| comes from imputed positions."),
         "sum_abs_beta_total": round(s1["sum_abs_beta"], 4),
         "sum_abs_beta_imputed": round(s1["sum_abs_beta_imputed"], 4),
         "sum_abs_beta_typed": round(s1["sum_abs_beta_typed"], 4),
-        "imputed_weight_fraction": round(s1["imputed_weight_fraction"], 4),
+        "imputed_weight_fraction": (round(s1["imputed_weight_fraction"], 4)
+                                    if s1["imputed_weight_fraction"] is not None else None),
         "n_variants_imputed": s1["n_variants_imputed"],
         "n_variants_typed": s1["n_variants_typed"],
-        "direction": "toward the centre of the distribution",
-        "magnitude": "not measured",
+        "direction": "not measured" if imputed_any else "none: nothing was imputed",
+        "magnitude": "not measured" if imputed_any else "none",
         "status": "This is a disclosure, not a correction. No adjustment was applied.",
     }
 
     cen = cohort["centrality"]
-    effect_found = verdict != "no centrality effect detected"
     src = cohort["cohort_source_group"]
 
     art["cohort_fit_note"] = {
-        "finding": verdict,
+        "finding": ("not decided by this tool: the measurements are below, and no cutoff "
+                    "turns them into a verdict"),
         "statement": (
-            ("The patient's PC coordinates are more central than %.1f%% of the %d "
-             "reference samples: distance to the panel centroid is %.6f, against a "
-             "panel median of %.6f and a 5th percentile of %.6f. The cohort was "
-             "therefore selected around a point sitting near the centre of the "
-             "reference cloud, which makes the selected neighbours appear closer "
-             "than the patient's true genetic neighbourhood warrants."
-             if effect_found else
-             "The patient's PC coordinates sit at an ordinary distance from the "
-             "panel centroid: %.6f, with %.1f%% of the %d reference samples closer "
-             "to the centroid than the patient, against a panel median of %.6f and "
-             "a 5th percentile of %.6f. The cohort was not selected around an "
-             "unusually central point, and no centrality effect is disclosed here. "
-             "See `finding` and `shrinkage_vs_fit_assessment` for what was measured "
-             "to reach that.")
-            % ((cen["pct_of_panel_closer_to_centroid"], cohort["n_available"],
-                cen["patient_distance_to_centroid"],
-                cen["panel_median_distance_to_centroid"],
-                cen["panel_p5_distance_to_centroid"]) if effect_found else
-               (cen["patient_distance_to_centroid"],
-                cen["pct_of_panel_closer_to_centroid"], cohort["n_available"],
-                cen["panel_median_distance_to_centroid"],
-                cen["panel_p5_distance_to_centroid"]))),
+            "%.1f%% of the %d reference samples in the candidate pool are closer to the "
+            "panel centroid than the patient's PC coordinates. The patient's distance to "
+            "the centroid is %.6f, %s the panel median of %.6f (5th percentile %.6f). "
+            "Whether that position makes the selected neighbours closer than the patient's "
+            "genetic neighbourhood warrants is not decided here; "
+            "shrinkage_vs_fit_assessment sets out the measurements that bear on it."
+            % (cen["pct_of_panel_closer_to_centroid"], cohort["n_available"],
+               cen["patient_distance_to_centroid"],
+               ("below" if cen["patient_distance_to_centroid"]
+                < cen["panel_median_distance_to_centroid"] else
+                "above" if cen["patient_distance_to_centroid"]
+                > cen["panel_median_distance_to_centroid"] else "equal to"),
+               cen["panel_median_distance_to_centroid"],
+               cen["panel_p5_distance_to_centroid"])),
         "shrinkage_vs_fit_assessment": assessment,
         "centrality_measurement": cen,
         "curve_shape": cohort["curve_shape"],
@@ -1517,53 +1516,42 @@ def build_artifact(args, projection, s1, cohort, parity, score_stats,
         "patient_vs_baseline_by_superpopulation": cohort["patient_vs_baseline_by_superpopulation"],
         "baseline_frame_note": (
             "The all-panel percentiles and the per-superpopulation percentiles "
-            "answer different questions and can disagree sharply. The panel mixes "
-            "groups whose own neighbour distances differ by nearly 2x, so a patient "
-            "near a mid-density group drifts across the all-panel percentiles "
-            "without anything about that patient changing. The per-group figures "
-            "are the ones the assessment reads; the all-panel figures are kept "
-            "because they are what the drift shows up in."),
+            "answer different questions and can disagree sharply. The pool mixes "
+            "groups whose own median d1 differs by %.2fx between the tightest and the "
+            "loosest, so a patient near one group can drift across the all-panel "
+            "percentiles without anything about that patient changing. Both are "
+            "reported; the all-panel figures are what any such drift shows up in."
+            % _d1_spread(cohort["reference_baseline_by_superpopulation"])),
         "cohort_source_group": src,
         "cohort_source_group_definition": (
             "The largest superpopulation among the selected neighbours (%s, %d of "
             "%d). It names which reference samples the cohort is built from, so the "
-            "fit assessment can be read against the right baseline. It is NOT a "
+            "measurements can be read against that group's own baseline. It is NOT a "
             "group assignment for the patient -- see "
             "ancestry_grouping_definition.why_no_label."
             % (src, cohort["superpopulation_counts"].get(src, 0),
                cohort["n_selected"])),
-        "direction": ("toward the centre of the distribution" if effect_found
-                      else "no directional effect detected"),
-        "magnitude": ("not measured" if effect_found else
-                      "measured and null; see centrality_measurement and curve_shape"),
-        "status": (("This is a disclosure, not a correction. No adjustment was "
-                    "applied to the patient's coordinates or to the cohort.")
-                   if effect_found else
-                   ("No disclosure is made. No adjustment was applied to the "
-                    "patient's coordinates or to the cohort, and none is called "
-                    "for by these measurements. The measurements are reported in "
-                    "full so the null result is checkable rather than asserted.")),
+        "direction": "not measured",
+        "magnitude": "not measured",
+        "status": ("A report of measurements, not a correction and not a verdict. No "
+                   "adjustment was applied to the patient's coordinates or to the cohort."),
         "combined_effect_with_imputation": (
-            ("This bias and imputation_shrinkage_note push the same way. Imputation "
-             "pulls the patient's SCORE toward the panel mean; projection shrinkage "
-             "pulls the COHORT SELECTION toward the panel centre. They act on "
-             "different quantities by different mechanisms, but both move the "
-             "resulting percentile toward the 50th. Neither is corrected here and "
-             "the combined magnitude is not measured.")
-            if effect_found else
-            ("Nothing here compounds with imputation_shrinkage_note. That note "
-             "stands on its own measurement and is unaffected by this one: it "
-             "concerns the patient's SCORE, this concerns COHORT SELECTION, and "
-             "only the score effect is present. Any downstream text that lists a "
-             "projection-shrinkage caveat alongside the imputation caveat is "
-             "carrying a caveat this artifact does not support.")),
+            "Not measured. This note concerns cohort selection and "
+            "imputation_shrinkage_note the patient's score; whether either moves the "
+            "placement, and how they combine, is not measured here."),
     }
 
     art["distribution"] = summarise(score_stats.get("scores_sum"))
+    # Every cohort member's score, not only nine quantiles: the agent places the patient
+    # by counting against these, and a quantile table would leave it to interpolate.
+    if score_stats.get("scores_sum") is not None:
+        art["distribution"]["raw_scores"] = [float(x) for x in score_stats["scores_sum"]]
+        art["distribution"]["raw_score_sample_ids"] = list(score_stats["iids_scored"])
     art["distribution_score_avg"] = summarise(score_stats.get("scores_avg"))
     art["distribution_note"] = (
-        "Raw scores, computed on the patient's resolved variant set. "
-        "distribution is SCORE1_SUM; distribution_score_avg is SCORE1_AVG."
+        "Raw scores from the patient's own score input. distribution is SCORE1_SUM, "
+        "with each cohort member's score in raw_scores and their reference sample id at "
+        "the same index of raw_score_sample_ids; distribution_score_avg is SCORE1_AVG."
         if usable else
         "No distribution was built. The provider refused under INT-2; every "
         "quantile is null rather than zero, because a zero would be a fabricated "
@@ -1587,6 +1575,17 @@ def main():
                     help="the PGS Catalog scoring file (gzipped) in the patient's build")
     ap.add_argument("--ref-vcf", required=True,
                     help="reference panel VCF the cohort is scored from")
+    ap.add_argument("--score-input", required=True,
+                    help="the patient's own plink score input (ID EA BETA), the file "
+                         "score_plink2.py scored the patient with. The cohort is scored "
+                         "from this file and no other.")
+    ap.add_argument("--request", required=True,
+                    help="the INT-1 request.json. The patient's assay, ancestry group, "
+                         "and score-input counts and hash are read from it.")
+    ap.add_argument("--reference-assay", required=True,
+                    help="what assay produced the reference genotypes, in your words. "
+                         "No VCF field says this, so it is your statement and is "
+                         "recorded as such.")
     ap.add_argument("--effect-weight-col", required=True,
                     help="the weight column, read off the scoring file's own header. "
                          "Not assumed: only six columns are universal across PGS Catalog "
@@ -1597,6 +1596,10 @@ def main():
                          "to include, and it is not derived from anything.")
     ap.add_argument("--min-cohort", type=int, required=True,
                     help="refuse below this cohort size. No default, for the same reason.")
+    ap.add_argument("--k-rationale", default=None,
+                    help="why you chose --k (and --max-kth-distance, if you set it), in "
+                         "your words. Recorded verbatim; the tool's own text reports "
+                         "measurements and never states a reason for k.")
     ap.add_argument("--max-kth-distance", type=float, default=None,
                     help="refuse if the kth neighbour is further than this "
                          "(default: no check)")
@@ -1630,27 +1633,32 @@ def main():
     projection_path = I("projection.json")
     eigenvec = I("ref_pca.eigenvec")
     eigenval = I("ref_pca.eigenval")
-    panel = I("integrated_call_samples_v3.20130502.ALL.panel")
-    score_input = os.path.join(args.workdir, "plink_score_input.tsv")
+    labels_path = I("sample_labels.json")
+    rejoined = os.path.join(args.workdir, "step1_join_score_input.tsv")
 
-    for p in (dosages, scoring, projection_path, eigenvec, panel):
+    for p in (dosages, scoring, projection_path, eigenvec, labels_path,
+              args.score_input, args.request, args.ref_vcf):
         if not os.path.exists(p):
             die("required input missing: %s" % p)
 
     with open(projection_path) as fh:
         projection = json.load(fh)
+    with open(args.request) as fh:
+        request = json.load(fh)
 
     # ---- STEP 1 ----------------------------------------------------------
     print("=" * 72)
-    print("STEP 1  regenerate the score input")
+    print("STEP 1  join the resolved set to the scoring file")
     print("=" * 72)
     resolved, n_dosage_rows, status_counts = read_resolved_positions(dosages)
     print("  dosage data rows            : %d" % n_dosage_rows)
     for st, n in sorted(status_counts.items()):
         print("    %-16s        : %d" % (st, n))
 
-    s1 = build_score_input(scoring, resolved, score_input, args.expected_abs_beta,
+    s1 = build_score_input(scoring, resolved, rejoined, args.expected_abs_beta,
                            args.expected_imputed_abs_beta)
+    given_ids, given_ea, given_abs_beta = read_score_input(args.score_input)
+    s1["vs_score_input"] = compare_score_inputs(rejoined, given_ea)
     print("  scoring file rows           : %d" % s1["n_scoring_file_rows"])
     print("  variants emitted            : %d  (typed %d, imputed %d)"
           % (s1["n_variants_emitted"], s1["n_variants_typed"], s1["n_variants_imputed"]))
@@ -1663,9 +1671,14 @@ def main():
               % (s1["sum_abs_beta"], s1["expected_sum_abs_beta"]))
     print("    of which typed positions  : %.4f" % s1["sum_abs_beta_typed"])
     print("    of which imputed positions: %.4f  (%.1f%%)  [%s]"
-          % (s1["sum_abs_beta_imputed"], 100.0 * s1["imputed_weight_fraction"],
+          % (s1["sum_abs_beta_imputed"], 100.0 * (s1["imputed_weight_fraction"] or 0.0),
              s1["imputed_split_verification"]))
-    print("  score file                  : %s" % score_input)
+    vs = s1["vs_score_input"]
+    print("  patient's score input       : %d variants (%d in both, %d only in the "
+          "join, %d only in the score input, %d with a different effect allele)"
+          % (vs["n_in_patient_score_input"], vs["n_in_both"], vs["n_only_in_step1_join"],
+             vs["n_only_in_patient_score_input"],
+             vs["n_in_both_with_a_different_effect_allele"]))
 
     # ---- STEP 2 ----------------------------------------------------------
     print()
@@ -1689,13 +1702,13 @@ def main():
 
     iids, coords = load_eigenvec(eigenvec, n_pcs)
     eigenvals = load_eigenval(eigenval, n_pcs)
-    labels = load_panel(panel)
-    print("  reference samples           : %d" % len(iids))
+    labels = load_sample_labels(labels_path)
+    print("  basis samples               : %d" % len(iids))
     print("  PCs used                    : %d" % n_pcs)
     missing_labels = [s for s in iids if s not in labels]
     if missing_labels:
-        die("%d eigenvec samples have no panel label (e.g. %s)"
-            % (len(missing_labels), missing_labels[:3]))
+        die("%d eigenvec samples have no label in %s (e.g. %s)"
+            % (len(missing_labels), labels_path, missing_labels[:3]))
 
     expected_n = (projection.get("reference_build") or {}).get("n_reference_samples")
     if expected_n is not None and len(iids) != expected_n:
@@ -1723,9 +1736,77 @@ def main():
                   "(the other vector does). Proceeding as instructed; this is "
                   "recorded in the artifact." % args.pc_source)
 
+    # The candidate pool. The self-check above ran over every basis sample, because
+    # that is the set the agent's neighbours were counted over. A cohort member must
+    # also be scorable, so the pool is the basis samples whose genotypes are in the
+    # reference VCF -- a consequence of which genotypes exist, recorded in full so it
+    # is stated rather than hidden.
+    vh = vcf_header_facts(args.ref_vcf)
+    in_vcf = set(vh["samples"])
+    keep = [i for i, smp in enumerate(iids) if smp in in_vcf]
+    dropped = [i for i, smp in enumerate(iids) if smp not in in_vcf]
+    d_pop, d_sup = counts_for(iids, labels, dropped)
+    pool = collections.OrderedDict([
+        ("definition", "the PCA basis samples (ref_pca.eigenvec) whose genotypes are "
+                       "present in the --ref-vcf header; a basis sample with no "
+                       "genotypes cannot be scored, so it cannot be a cohort member"),
+        ("n_basis_samples", len(iids)),
+        ("n_ref_vcf_samples", len(in_vcf)),
+        ("n_available", len(keep)),
+        ("n_basis_samples_without_genotypes", len(dropped)),
+        ("basis_samples_without_genotypes_by_superpopulation", d_sup),
+        ("basis_samples_without_genotypes_by_population", d_pop),
+        ("n_ref_vcf_samples_not_in_basis", len(in_vcf - set(iids))),
+        ("self_check_ran_on", "every basis sample, before this restriction"),
+    ])
+    # What the restriction did to THIS patient's neighbourhood, not only to the pool: of
+    # the k basis samples nearest the patient over the whole basis, how many have no
+    # genotypes and so cannot be cohort members, and how far the k-th nearest sits with
+    # and without them. Without this a reader can only reconstruct it by comparing
+    # self_check_pc_space with the selected cohort's counts.
+    if args.k >= 1 and len(iids):
+        d_full = np.linalg.norm(coords - patient_vecs[args.pc_source], axis=1)
+        order_full = np.argsort(d_full, kind="stable")
+        kk = min(args.k, len(iids))
+        dropped_set = set(dropped)
+        near_dropped = [i for i in order_full[:kk] if i in dropped_set]
+        nd_pop, nd_sup = counts_for(iids, labels, near_dropped)
+        pool["patient_neighbourhood_before_restriction"] = collections.OrderedDict([
+            ("k", kk),
+            ("n_of_the_k_nearest_basis_samples_without_genotypes", len(near_dropped)),
+            ("those_by_superpopulation", nd_sup),
+            ("those_by_population", nd_pop),
+            ("d_k_over_every_basis_sample", float(d_full[order_full[kk - 1]])),
+            ("note", "the k basis samples nearest the patient, by the same PC vector and "
+                     "distance as the cohort, over every basis sample before the pool "
+                     "restriction; d_k_over_the_candidate_pool is the same distance "
+                     "after it"),
+        ])
+    print("  candidate pool              : %d of %d basis samples have genotypes in "
+          "the reference VCF (%d VCF samples)" % (len(keep), len(iids), len(in_vcf)))
+    if not keep:
+        die("no basis sample has genotypes in %s; there is nothing to score"
+            % args.ref_vcf)
+    iids = [iids[i] for i in keep]
+    coords = coords[keep]
+
     cohort = select_cohort(iids, coords, labels, patient_vecs[args.pc_source],
                            args.k, args.min_cohort, args.max_kth_distance,
                            eigenvals=eigenvals)
+    if "patient_neighbourhood_before_restriction" in pool:
+        pool["patient_neighbourhood_before_restriction"]["d_k_over_the_candidate_pool"] = (
+            cohort["neighbour_distances"]["dk"])
+        pool["patient_neighbourhood_before_restriction"]["k_for_d_k_over_the_candidate_pool"] = (
+            cohort["neighbour_distances"]["k_for_dk"])
+    cohort["candidate_pool"] = pool
+    cohort["ref_vcf"] = vh
+    prov_path = args.ref_vcf + ".provenance.json"
+    if os.path.exists(prov_path):
+        with open(prov_path) as fh:
+            pr = json.load(fh)
+        cohort["ref_vcf_provenance"] = {k_: pr.get(k_) for k_ in (
+            "tool", "generated_utc", "phase3_dir", "scoring_file_sha256", "chromosomes",
+            "n_records_written", "n_positions_not_in_panel", "samples_in_output")}
     nd = cohort["neighbour_distances"]
     print("  pc-source                   : %s" % args.pc_source)
     print("  cohort scored in step 3     : %d  (--k %d, available %d)"
@@ -1863,19 +1944,21 @@ def main():
     print("    patient pctile = %% of reference samples whose own r-th neighbour is")
     print("    CLOSER than the patient's. 50%% means the patient sits like a typical")
     print("    panel member at that rank; high means the panel fits them worse.")
-    print("    (Patient distances are over 2504 samples, each reference sample's own")
-    print("    over the other 2503 -- a negligible asymmetry, noted for honesty.)")
+    print("    (Patient distances are over %d samples, each reference sample's own"
+          % cohort["n_available"])
+    print("    over the other %d -- a negligible asymmetry, noted for honesty.)"
+          % (cohort["n_available"] - 1))
 
     # The same profile against the group the cohort is drawn from. The all-panel
     # column above mixes groups of very different density and drifts on its own;
-    # this is the column the fit verdict is actually read off.
+    # this column is the patient against the group the cohort is mostly made of.
     src_g = cohort["cohort_source_group"]
     if src_g:
         print()
         print("    vs %s alone (%d of the %d selected neighbours) -- the baseline the"
               % (src_g, cohort["superpopulation_counts"].get(src_g, 0),
                  cohort["n_selected"]))
-        print("    cohort is drawn from, and the one the fit verdict is read off:")
+        print("    cohort is drawn from:")
         print("      " + "  ".join(
             "d%d %.1f%%" % (r, pct_by_sup[src_g]["d%d" % r])
             for r in BASELINE_RANKS if pct_by_sup[src_g].get("d%d" % r) is not None))
@@ -1911,7 +1994,20 @@ def main():
     scoring_sha256 = sha256_of(scoring)
     plink2_version = run_plink2(args.plink2, ["--version"], "version check").strip()
     score_stats = {}
-    parity = None
+    rp = request.get("patient") or {}
+    parity = {
+        "label": None, "statement": None,
+        "score_input_sha256": sha256_of(args.score_input),
+        "score_input_sha256_in_request": rp.get("score_input_sha256"),
+        "recipe": None,
+        "n_given": len(given_ids),
+        "n_reference_used": None,
+        "n_patient_used": rp.get("n_variants_in_score"),
+        "n_patient_given": rp.get("n_variants_in_score_input"),
+        "plink2_patient": rp.get("plink2_version"),
+        "n_not_scored": None, "sum_abs_beta_not_scored": None,
+        "not_scored_examples": [], "log_lines": [], "allele_ct_min_max": None,
+    }
 
     if cohort["refusals"]:
         # INT-2 refusal. Do not score: there is no defensible cohort. Still write
@@ -1920,81 +2016,108 @@ def main():
         print("=" * 72)
         print("STEP 3  SKIPPED -- INT-2 refusal, no cohort to score")
         print("=" * 72)
-        parity = {k: 0 for k in (
-            "n_present_in_vcf", "n_missing_from_vcf", "n_multi_record_positions",
-            "n_multi_resolved_by_exact_allele_match",
-            "n_multi_resolved_by_effect_allele_only", "n_multi_dropped_unresolvable",
-            "n_allele_mismatch", "n_allele_mismatch_strand_flip_only")}
-        parity["sum_abs_beta_not_scored"] = 0.0
-        parity["multi_record_decisions"] = []
+        parity["statement"] = "nothing was scored: INT-2 refusal, see reason"
     else:
         print()
         print("=" * 72)
-        print("STEP 3  score the cohort on the patient's resolved set")
+        print("STEP 3  score the cohort from the patient's own score input")
         print("=" * 72)
-        ref_vcf = args.ref_vcf
-        if not os.path.exists(ref_vcf):
-            die("reference VCF missing: %s" % ref_vcf)
-        ref_prefix = os.path.join(args.workdir, "ref")
-        import_reference(args.plink2, ref_vcf, ref_prefix)
-
-        pvar_map, n_pvar = read_pvar(ref_prefix + ".pvar")
-        print("  reference records loaded    : %d at %d distinct positions"
-              % (n_pvar, len(pvar_map)))
-
-        resolved_score = os.path.join(args.workdir, "plink_score_input.resolved.tsv")
-        parity = resolve_score_variants(score_input, pvar_map, scoring, resolved_score)
-
-        print("  PARITY CHECK (patient's resolved set vs the reference panel)")
-        print("    emitted in step 1         : %d" % parity["n_emitted"])
-        print("    present in reference VCF  : %d" % parity["n_present_in_vcf"])
-        print("    MISSING from reference VCF: %d" % parity["n_missing_from_vcf"])
-        if parity["missing_examples"]:
-            print("      e.g. %s" % ", ".join(parity["missing_examples"][:5]))
-        print("    allele mismatch (excluded): %d  (of which strand-flip-only: %d)"
-              % (parity["n_allele_mismatch"], parity["n_allele_mismatch_strand_flip_only"]))
-        for ex in parity["allele_mismatch_examples"][:5]:
-            print("      e.g. %s model EA=%s vs VCF %s/%s"
-                  % (ex["position"], ex["model_ea"], ex["vcf_ref"], ex["vcf_alt"]))
-        print("    multi-record positions    : %d" % parity["n_multi_record_positions"])
-        for dec in parity["multi_record_decisions"]:
-            print("      %-16s %s -> %s"
-                  % (dec["position"], "/".join(dec["records_present"]),
-                     dec["chosen"] or "DROPPED"))
-            print("      %-16s rule: %s  (|beta| %.3e)"
-                  % ("", dec["rule_applied"], dec["abs_beta"]))
-        print("    dropped unresolvable      : %d" % parity["n_multi_dropped_unresolvable"])
-        print("    -> variants in score file : %d" % parity["n_final_scored"])
-        print("    |beta| not scored         : %.6e" % parity["sum_abs_beta_not_scored"])
-
         keep_path = os.path.join(args.workdir, "cohort.keep")
         out_prefix = os.path.join(args.workdir, "cohort_score")
-        _log, n_processed = score_cohort(args.plink2, ref_prefix, resolved_score,
-                                         keep_path, cohort["selected_samples"],
-                                         out_prefix)
+        _log, n_processed, used, log_lines = score_cohort(
+            args.plink2, args.ref_vcf, args.score_input, keep_path,
+            cohort["selected_samples"], out_prefix)
         iids_scored, cols = read_sscore(out_prefix + ".sscore")
 
-        shortfall = parity["n_final_scored"] - (n_processed or 0)
-        print("  plink2 variants processed   : %s" % n_processed)
-        print("  shortfall vs score file     : %d %s"
-              % (shortfall, "" if shortfall == 0 else "  <-- FLAGGED, see artifact"))
+        used_set = set(used)
+        not_scored = [v for v in given_ids if v not in used_set]
+        n_given = len(given_ids)
+        ac = cols.get("ALLELE_CT", cols.get("NALLELE_CT"))
+        ac_mm = [int(ac.min()), int(ac.max())] if ac is not None and len(ac) else None
+        parity.update({
+            "recipe": ("plink2 --vcf <ref-vcf> --set-all-var-ids @:# --rm-dup exclude-all "
+                       "--import-max-alleles 2 --keep <cohort> --score <score-input> 1 2 3 "
+                       "header cols=+scoresums,+denom no-mean-imputation list-variants"),
+            "n_reference_used": n_processed,
+            "n_not_scored": len(not_scored),
+            "sum_abs_beta_not_scored": math.fsum(given_abs_beta[v] for v in not_scored),
+            "not_scored_examples": not_scored[:10],
+            "log_lines": log_lines,
+            "allele_ct_min_max": ac_mm,
+        })
+
+        # Each condition is one way the two scores could cover different variants.
+        # same-resolved-set needs all of them; a failed one is named in the statement.
+        sha_req = parity["score_input_sha256_in_request"]
+        n_pu, n_pg = parity["n_patient_used"], parity["n_patient_given"]
+        pv_here = (plink2_version.splitlines() or [""])[0].strip()
+        pv_patient = (str(parity["plink2_patient"]).strip()
+                      if parity["plink2_patient"] is not None else None)
+        checks = [
+            (pv_patient == pv_here,
+             "the patient was scored by %r, per the request, and the cohort by %r"
+             % (pv_patient, pv_here)),
+            (sha_req is not None and sha_req == parity["score_input_sha256"],
+             "the score input's sha256 %s is not the one the request names (%s)"
+             % (parity["score_input_sha256"], sha_req)),
+            (n_pg == n_given,
+             "the request says the patient's score input held %s variants; this one "
+             "holds %d" % (n_pg, n_given)),
+            (n_pu == n_given,
+             "the patient's own scoring used %s of the %d variants" % (n_pu, n_given)),
+            (not not_scored and n_processed == n_given,
+             "plink2 used %s of the %d variants for the reference cohort"
+             % (n_processed, n_given)),
+            (ac_mm is not None and n_processed is not None
+             and ac_mm[0] == ac_mm[1] == 2 * n_processed,
+             "reference ALLELE_CT runs %s to %s where every call present at the %s "
+             "variants plink2 used would give %s, so some cohort genotypes were missing "
+             "and no-mean-imputation scored them as zero dosage"
+             % (ac_mm and ac_mm[0], ac_mm and ac_mm[1], n_processed,
+                2 * n_processed if n_processed is not None else None)),
+        ]
+        failed = [msg for ok, msg in checks if not ok]
+        if not failed:
+            parity["label"] = "same-resolved-set"
+            parity["statement"] = (
+                "Reference individuals were scored from the patient's own score input, "
+                "by the recipe score_plink2.py scored the patient with and the same plink2 "
+                "build, and every one of its %d variants was used for the patient and for "
+                "every cohort member." % n_given)
+        else:
+            parity["label"] = "other"
+            parity["statement"] = (
+                "Not the same resolved set: %s. The cohort was scored from the patient's "
+                "own score input by the patient's recipe; the counts are in this block."
+                % "; ".join(failed))
+
+        print("  PARITY (the patient's score input vs what plink2 used for the cohort)")
+        print("    variants in score input   : %d" % n_given)
+        print("    used for the reference    : %s" % n_processed)
+        print("    not scored in reference   : %d  (|beta| %.6e)"
+              % (len(not_scored), parity["sum_abs_beta_not_scored"]))
+        if not_scored:
+            print("      e.g. %s" % ", ".join(not_scored[:5]))
+        print("    used for the patient      : %s of %s  (from the request)"
+              % (n_pu, n_pg))
+        for ln in log_lines:
+            print("    plink2: %s" % ln)
+        if ac_mm:
+            print("  ALLELE_CT per sample        : min %d, max %d (2 x variants used = %s)"
+                  % (ac_mm[0], ac_mm[1],
+                     2 * n_processed if n_processed is not None else "?"))
+        print("  scoring_parity              : %s" % parity["label"])
+        for msg in failed:
+            print("    - %s" % msg)
         print("  samples scored              : %d (requested %d)"
               % (len(iids_scored), cohort["n_selected"]))
         if len(iids_scored) != cohort["n_selected"]:
             print("  WARNING: plink2 scored a different number of samples than selected")
 
-        ac = cols.get("ALLELE_CT", cols.get("NALLELE_CT"))
-        if ac is not None:
-            print("  ALLELE_CT per sample        : min %d, max %d (2 x variants = %d)"
-                  % (ac.min(), ac.max(), 2 * (n_processed or 0)))
-            if ac.min() != ac.max():
-                print("  NOTE: ALLELE_CT varies across samples -- there is missingness "
-                      "in the reference and plink2 mean-imputed it.")
-
         score_stats = {
             "n_processed": n_processed,
             "n_scored": len(iids_scored),
-            "shortfall": shortfall,
+            "iids_scored": iids_scored,
             "scores_sum": cols.get("SCORE1_SUM"),
             "scores_avg": cols.get("SCORE1_AVG"),
         }
@@ -2004,7 +2127,7 @@ def main():
     print("=" * 72)
     print("STEP 4  emit the artifact")
     print("=" * 72)
-    art = build_artifact(args, projection, s1, cohort, parity, score_stats,
+    art = build_artifact(args, projection, request, s1, cohort, parity, score_stats,
                          scoring_sha256, plink2_version)
     with open(args.out, "w") as fh:
         json.dump(art, fh, indent=2)

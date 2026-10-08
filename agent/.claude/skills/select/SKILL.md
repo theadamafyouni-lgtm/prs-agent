@@ -191,6 +191,7 @@ python3 tools/file_facts.py --input <the downloaded .txt.gz> \
 python3 tools/weight_coverage.py estimate \
     --scorefile <the downloaded .txt.gz> \
     --chr-col hm_chr --pos-col hm_pos --effect-weight-col <as the header actually names it> \
+    --imputed-contigs 1-22 \
     --patient-vcf runs/<RUN_ID>/door/normalized.vcf.gz \
     --panel-index refdata/panel/sites_index \
     --high-beta-fraction 0.05 \
@@ -199,14 +200,30 @@ python3 tools/weight_coverage.py estimate \
 
 **Read the caveat in the output and mean it.** This estimate is structurally blind to imputability:
 it sees weight sitting on positions missing from the patient's file, but it cannot see r²/INFO until
-imputation actually runs. `resolved_weight_fraction` here is an **upper bound** on what `score` will
-measure. Say "estimate" to the person, not "coverage".
+imputation actually runs. So it gives a bracket, not a number:
+
+- `resolved_weight_fraction` is the **upper bound**: directly typed weight plus the weight on panel
+  positions pending imputation, as if every one of them imputed at or above the bar. `score` can
+  only measure less (r², the palindromic policy and allele checks all take weight away, never add
+  it).
+- `resolved_weight_fraction_typed_only` is the figure with no imputation at all. Show it, and name
+  the gap between the two as what this choice depends on imputation for. Do not gate on it.
+
+`--imputed-contigs` is the set of chromosomes `score` will impute (the staged panel is chr1–22). A
+model position on any other contig counts as unresolved, typed or not, because `score` never sees
+it. Say "estimate" to the person, not "coverage".
 
 The gate is `SCO-8`'s two conditions:
 
-1. **Weighted coverage** — refuse if resolved Σ|β| < **0.90**.
-2. **High-β condition** — refuse if any single unresolved locus carries **≥ 5%** of total Σ|β|,
-   reported **individually by locus, never summed into the fraction**.
+1. **Weighted coverage** — refuse if the upper bound (`resolved_weight_fraction`) is < **0.90**:
+   below it the model cannot reach the floor at `score` even if everything in the panel imputes
+   well. At or above it the model only *may* pass; `score`'s measured number decides.
+2. **High-β condition** — refuse if any single locus in `high_beta_unresolved_loci` carries
+   **≥ 5%** of total Σ|β|, reported **individually by locus, never summed into the fraction**.
+   Here *unresolved* means no route can reach it: absent from the panel, on a chromosome `score`
+   does not impute, or with no usable position. A ≥ 5% locus listed in
+   `high_beta_pending_imputation_loci` is not a refusal here — name it as a cost of the choice;
+   `score`'s measured condition 2 decides it.
 
 Below the floor, **refuse** (`SEL-10`) — do not offer "want it anyway?". Offering a hopeless choice
 is its own fake consent. Above it, the survivors keep their ancestry/validation ranking; coverage
@@ -231,8 +248,8 @@ The line is **not** technical difficulty. It is who the judgment belongs to:
 
 ## 7. The select → score → reselect loop (`SEL-12`)
 
-Because §5 selects on an *estimate*, a candidate can look acceptable here and prove worse once
-scored. Take the top-ranked candidate → let `score` produce the real number → if it is **materially
+Because §5 selects on an *upper bound*, a candidate can look acceptable here and prove worse once
+scored — the measured number can only be at or below it. Take the top-ranked candidate → let `score` produce the real number → if it is **materially
 worse**, come back and take the next candidate down the list.
 
 - **You decide what "materially worse" means, each time.** There is deliberately no threshold; a
@@ -252,7 +269,9 @@ python3 tools/record.py --run <RUN_ID> --stage select --name model_choice --judg
   "trait_id": "...", "chosen_model": "...", "gate_type": "transparency|decision",
   "candidates_considered": [{"pgs_id": "...", "why_ranked_here": "...", "cost_of_choosing_it": "..."}],
   "questions_asked": [{"question": "...", "answer": "...", "hard_blocker": true}],
-  "coverage_estimate": {"resolved_weight_fraction": 0.0, "is_an_estimate": true},
+  "coverage_estimate": {"resolved_weight_fraction": 0.0,
+                        "resolved_weight_fraction_is": "upper_bound_pre_imputation",
+                        "resolved_weight_fraction_typed_only": 0.0, "is_an_estimate": true},
   "reasons": ["..."],
   "evidence": [{"source": "runs/<RUN_ID>/select/...", "field": "..."}]
 }

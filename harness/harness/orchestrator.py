@@ -9,10 +9,13 @@ those shortcuts would turn a measurement into a rehearsal.
 import hashlib
 import json
 import os
+import platform
 import queue
 import re
 import shutil
+import struct
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -49,12 +52,21 @@ or `[no reply from the person]`. The last three are real outcomes, not errors to
 
 ## Reaching the reference provider
 
-    python3 comms/harness_client.py request-reference --request runs/{run_id}/interpret/request.json
+    python3 comms/harness_client.py request-reference --no-wait \\
+        --request runs/{run_id}/interpret/request.json
 
-It blocks and prints the path where the provider's artifact landed, which you then pass to
+prints a request id at once. Building a reference can take hours, longer than one command
+may run, so collect the result with
+
+    python3 comms/harness_client.py await-reference --id <that id> --timeout 540
+
+and repeat it while it exits 6, which means still running. Give each such Bash call a
+600000 ms timeout: the default of 2 minutes cuts it off before it can return. When the
+provider has answered it
+prints the path where the provider's artifact landed, which you then pass to
 `tools/reference_adapter.py --reference <that path>`. It may instead report that no usable
 reference could be built, or that none was supplied. Both are outcomes the contract provides
-for. Do not work around either.
+for. Do not work around either. The person can still be asked questions while you wait.
 
 ## Two things about this environment that differ from the skill text
 
@@ -516,12 +528,20 @@ def _live_run_processes(run_id):
         found.append({"pid": pid, "cmd": parts[1][:200]})
     return found
 
-def _chmod_tree(root, file_mode, dir_mode):
-    """chmod a tree WITHOUT following any symlink out of it.
+def _chmod_tree(root, file_mode, dir_mode, shared=None):
+    """chmod a tree WITHOUT following any symlink out of it, and without touching any file
+    whose inode it shares with somewhere else.
 
     os.walk puts a symlink-to-directory in `dirs`, and os.chmod follows symlinks by default.
     Chmod'ing the jail HOME's `Library/Keychains` link therefore changed the mode of the real
     ~/Library/Keychains. Every symlink is skipped and counted instead.
+
+    The same mistake through a different door: on Linux the refdata clone is `cp -al`, so
+    every file under <sandbox>/refdata IS the file in agent/refdata and in every other run's
+    clone. A mode is a property of the inode, so freezing one run to 0444 took the execute
+    bit off agent/refdata/bin/plink2 for every run after it -- run manifests from September
+    record `plink2: Permission denied`. A regular file with more than one link is
+    skipped and, when `shared` is a list, recorded in it.
     """
     n = 0
     skipped = []
@@ -530,6 +550,17 @@ def _chmod_tree(root, file_mode, dir_mode):
             p = os.path.join(cur, name)
             if os.path.islink(p):
                 skipped.append(os.path.relpath(p, root))
+                continue
+            try:
+                st = os.lstat(p)
+            except OSError:
+                continue
+            # Only refdata is staged as hard links (cp -al). A file with extra links anywhere
+            # else was linked by something inside the run, and is frozen like any other.
+            if (not os.path.isdir(p) and st.st_nlink > 1
+                    and "refdata" in os.path.relpath(p, root).split(os.sep)):
+                if shared is not None:
+                    shared.append(os.path.relpath(p, root))
                 continue
             try:
                 os.chmod(p, dir_mode if os.path.isdir(p) else file_mode)
@@ -543,6 +574,50 @@ def _as_text(v):
     if v is None:
         return ""
     return v.decode("utf-8", "replace") if isinstance(v, bytes) else str(v)
+
+
+# The client's message ids (harness_client.py: "q-" / "r-" + 12 hex). A reply file is
+# named after one, so nothing else is accepted.
+MESSAGE_ID_RE = re.compile(r"[qr]-[0-9a-f]{12}")
+
+_ELF_MACHINE = {"x86_64": 62, "amd64": 62, "aarch64": 183, "arm64": 183}
+_MACHO_CPU = {"x86_64": 0x01000007, "amd64": 0x01000007, "arm64": 0x0100000C,
+              "aarch64": 0x0100000C}
+
+
+def _built_for_here(path):
+    """(True, why) if `path` is an executable built for this OS and CPU, read off its
+    header; (False, why) otherwise.
+
+    Read, never run. The harness is outside every sandbox, and the refdata copy of a binary
+    shares its inode with each run's sandbox clone, so executing it here would make the
+    host's integrity depend on every past sandbox's read-only bind having held.
+    """
+    if not os.path.isfile(path):
+        return False, "absent"
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(4096)
+    except OSError as exc:
+        return False, "unreadable: %s" % type(exc).__name__
+    mach = platform.machine().lower()
+    if head[:4] == b"\x7fELF" and len(head) >= 20:
+        endian = "<" if head[5] == 1 else ">"
+        em = struct.unpack(endian + "H", head[18:20])[0]
+        ok = sys.platform.startswith("linux") and em == _ELF_MACHINE.get(mach)
+        return ok, ("ELF, e_machine %d; this host is %s/%s" % (em, sys.platform, mach))
+    cpus = []
+    if head[:4] in (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe") and len(head) >= 8:
+        cpus = [struct.unpack("<I", head[4:8])[0]]
+    elif head[:4] == b"\xca\xfe\xba\xbe" and len(head) >= 8:
+        n = struct.unpack(">I", head[4:8])[0]
+        cpus = [struct.unpack(">I", head[8 + 20 * i:12 + 20 * i])[0]
+                for i in range(min(n, 16)) if len(head) >= 12 + 20 * i]
+    if cpus:
+        ok = sys.platform == "darwin" and _MACHO_CPU.get(mach) in cpus
+        return ok, ("Mach-O, cputype %s; this host is %s/%s"
+                    % ([hex(c) for c in cpus], sys.platform, mach))
+    return False, "not an ELF or Mach-O executable"
 
 
 # ---------------------------------------------------------------------------
@@ -900,6 +975,17 @@ class Orchestrator:
         self._int1 = []
         self._ask_lock = threading.Lock()
         self._asking = None
+        # A reference build runs for up to TIMEOUT_PROVIDER in its own thread, so the router
+        # keeps serving the person meanwhile. One at a time: the provider sandbox is a single
+        # directory, and two builds in it would overwrite each other's inputs and artifact.
+        self._ref_lock = threading.Lock()
+        self._ref_threads = []
+        self._ref_in_flight = None
+        # The provider agent while it runs, so finish() can stop it rather than leave it
+        # running unsupervised after the harness exits.
+        self._ref_agent = None
+        self._finishing = threading.Event()
+        self._int1_lock = threading.Lock()
 
     # ==================================================================
     # staging
@@ -919,6 +1005,10 @@ class Orchestrator:
 
         self.manifest = manifest.Manifest(self.run_id, self.vault_dir)
         self.transcript = manifest.Transcript(os.path.join(self.vault_dir, "transcript.jsonl"))
+        # Read off the run, not off a config default: None means no --model reached the CLI,
+        # so the CLI's own default (unrecorded, and liable to move) was used.
+        self.manifest.set("model", {"requested": self.model,
+                                    "applies_to": ["prs", "persona", "provider"]})
 
         if self.stop_after:
             # Written before the agent launches, so even a run that dies mid-flight says it
@@ -1251,13 +1341,29 @@ class Orchestrator:
             staging.copy_in(panel_tool,
                             os.path.join(root, "build_reference_panel.py"), r,
                             "provider-tool")
-        plink = os.path.join(config.PROVIDER_SRC, "plink2")
-        if os.path.exists(plink):
+        # build_reference.py runs ./plink2. The pinned refdata/bin/plink2 is first choice:
+        # it is the binary score_plink2.py scored the patient with, so the cohort is scored
+        # by the same build. The bundled one (a macOS arm64 build) is the fallback. Chosen
+        # from each file's header, not by running it, and recorded with the reason, so a run
+        # says which binary scored its reference; build_reference.py also compares its
+        # version with the patient's.
+        plink, why = None, []
+        for cand in (os.path.join(config.REFDATA_SRC, "bin", "plink2"),
+                     os.path.join(config.PROVIDER_SRC, "plink2")):
+            ok, desc = _built_for_here(cand)
+            if ok:
+                plink = cand
+                why.append("%s is built for this host: %s" % (cand, desc))
+                break
+            why.append("%s is not used: %s" % (cand, desc))
+        if plink:
             staging.copy_in(plink, os.path.join(root, "plink2"), r, "provider-binary",
                             mode=0o555)
+        r.notes.append({"kind": "provider_plink2", "staged_from": plink, "why": why})
         staging.copy_in(
             os.path.join(config.AGENT, "interfaces", "reference-distribution.md"),
-            os.path.join(root, "CONTRACT.md"), r, "provider-contract")
+            os.path.join(root, "CONTRACT.md"), r, "provider-contract",
+            scrub_rel="CONTRACT.md")
         os.makedirs(os.path.join(root, "tmp"), exist_ok=True)
         staging.build_jail_home(os.path.join(root, ".home"), r)
 
@@ -1408,6 +1514,15 @@ class Orchestrator:
                     self._reply(inbox, name[:-5],
                                 {"status": "error", "reason": "unreadable message"})
                     continue
+                # The id names the reply file. It is the agent's to write, so it is held to
+                # the client's own format before anything uses it as a path.
+                if not isinstance(msg, dict) or not MESSAGE_ID_RE.fullmatch(
+                        str(msg.get("message_id") or "")):
+                    self._reply(inbox, name[:-5],
+                                {"status": "error",
+                                 "reason": "malformed message: message_id must look like "
+                                           "q-<12 hex> or r-<12 hex>"})
+                    continue
                 try:
                     self._handle(msg, inbox, profiles)
                 except Exception as exc:  # noqa: BLE001
@@ -1417,23 +1532,76 @@ class Orchestrator:
             time.sleep(config.POLL_INTERVAL)
 
     def _reply(self, inbox, message_id, payload):
-        os.makedirs(inbox, exist_ok=True)
-        tmp = os.path.join(inbox, "." + message_id + ".tmp")
-        final = os.path.join(inbox, message_id + ".json")
-        with open(tmp, "w") as fh:
-            json.dump(payload, fh, indent=2)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, final)
+        """Write a reply into comms/inbox under the message's id.
+
+        comms/ is inside the agent's sandbox, so the directory chain is walked without
+        following a link and the reply lands by rename (provider.write_in_dir). `inbox` is
+        kept for the call sites; the chain is always prs_root/comms/inbox.
+
+        A reply that cannot be written that way is recorded as a routing error, not raised:
+        raised, it would end the router thread, and every later message would go unanswered.
+        """
+        try:
+            dfd = provider.open_dir_chain(os.path.realpath(self.prs_root), ("comms", "inbox"),
+                                          create=True)
+            try:
+                provider.write_in_dir(dfd, message_id + ".json",
+                                      json.dumps(payload, indent=2).encode("utf-8"))
+            finally:
+                os.close(dfd)
+        except (OSError, provider.OutsideRun) as exc:
+            self._errors.put(RuntimeError("reply %s not written: %s" % (message_id, exc)))
 
     def _handle(self, msg, inbox, profiles):
         kind = msg.get("kind")
         if kind == "ask-person":
             return self._handle_ask(msg, inbox)
         if kind == "request-reference":
-            return self._handle_reference(msg, inbox, profiles)
+            return self._start_reference(msg, inbox, profiles)
         self._reply(inbox, msg["message_id"],
                     {"status": "error", "reason": "unknown message kind %r" % kind})
+
+    def _start_reference(self, msg, inbox, profiles):
+        """Hand the request to a provider in its own thread, and return to routing.
+
+        The provider can run for hours. Handled inline, it held the router for all of that
+        time, so a question to the person sat unrouted until the reference was built. The
+        reply still arrives in the inbox under the request's message id, whichever thread
+        writes it, so the client's blocking form and its await form both read it from there.
+        """
+        if not self._ref_lock.acquire(blocking=False):
+            in_flight = self._ref_in_flight
+            self.transcript.append(
+                direction="harness->agent", kind="int1_rejected_busy",
+                text=str(msg.get("request_path", "")),
+                meta={"message_id": msg.get("message_id"), "in_flight": in_flight,
+                      "note": "refused: a reference request is already being built"})
+            # The id in flight is named, so an agent whose blocking call was cut off can
+            # still collect the reply it never saw.
+            self._reply(inbox, msg["message_id"],
+                        {"status": "busy", "in_flight": in_flight,
+                         "reason": "reference request %s is already being built. Collect it "
+                                   "with await-reference --id %s before sending another."
+                                   % (in_flight, in_flight)})
+            return
+        self._ref_in_flight = msg["message_id"]
+
+        def work():
+            try:
+                self._handle_reference(msg, inbox, profiles)
+            except Exception as exc:  # noqa: BLE001
+                self._errors.put(exc)
+                self._reply(inbox, msg.get("message_id"),
+                            {"status": "error", "reason": str(exc)})
+            finally:
+                self._ref_in_flight = None
+                self._ref_agent = None
+                self._ref_lock.release()
+
+        t = threading.Thread(target=work, name="int1-%s" % msg.get("message_id"),
+                             daemon=True)
+        self._ref_threads.append(t)
+        t.start()
 
     def _handle_ask(self, msg, inbox):
         # The person has already gone. Asking again would re-invoke the persona, write an
@@ -1518,71 +1686,118 @@ class Orchestrator:
             self._reply(inbox, msg["message_id"], {"status": "timeout"})
 
     def _handle_reference(self, msg, inbox, profiles):
-        req = msg["request_path"]
+        req = str(msg.get("request_path") or "")
+        # The path is the agent's. The run directory must be a real directory where it says
+        # it is, and the request must resolve, links and all, to a regular file inside it,
+        # before the harness reads it with its own authority. It is read once: the hash and
+        # the staged copy are of the same bytes. The refusal does not say where the path
+        # resolved to, or whether it exists.
+        try:
+            run_dir = provider.real_run_dir(self.prs_root, self.run_id)
+            real_req = provider.resolve_inside(req, run_dir, self.prs_root, "the request path")
+            req_bytes = provider.read_regular(real_req, run_dir, "the request")
+        except (provider.OutsideRun, FileNotFoundError) as exc:
+            reason = ("refused: the request path %r is not a regular file inside this run's "
+                      "directory" % req) if isinstance(exc, FileNotFoundError) else str(exc)
+            self.transcript.append(direction="harness->agent", kind="int1_request_refused",
+                                   text=req, meta={"message_id": msg.get("message_id"),
+                                                   "reason": reason})
+            with self._int1_lock:
+                self._int1.append({"request": req, "staging": None,
+                                   "result": {"status": "error", "reason": reason}})
+            self._reply(inbox, msg["message_id"], {"status": "error", "reason": reason})
+            return
         self.transcript.append(direction="agent->provider", kind="int1_request",
                                text=req, meta={"message_id": msg["message_id"],
-                                               "sha256": staging.sha256(req)})
+                                               "sha256": hashlib.sha256(req_bytes).hexdigest()})
 
         handoff = provider.ProviderHandoff(self.provider_root, self.record, self.transcript)
-        summary = handoff.stage_guarded(req, self.prs_root)
-        self._int1.append({"request": req, "staging": summary})
+        summary = handoff.stage_guarded(real_req, self.prs_root, run_dir, req_bytes)
+        # This handoff's own record. Every later write goes to it under the lock, not to
+        # self._int1[-1], which is finish()'s to read from another thread.
+        entry = {"request": req, "staging": summary}
+        with self._int1_lock:
+            self._int1.append(entry)
 
-        if handoff.ambiguous:
-            # Two candidates for an input that must be unique. Staging a guess would put a
-            # silently wrong percentile into a clinical artifact, so the run says so instead.
-            self.transcript.append(direction="harness->agent", kind="int1_ambiguous_input",
-                                   text=handoff.ambiguous)
-            self._int1[-1]["result"] = {"status": "error", "reason": handoff.ambiguous}
-            self._reply(inbox, msg["message_id"],
-                        {"status": "error", "reason": handoff.ambiguous})
+        if handoff.ambiguous or handoff.refused:
+            # Two candidates for an input that must be unique, or a file the agent named
+            # outside its own run. Staging a guess would put a silently wrong percentile into
+            # a clinical artifact, and fetching the file would be the harness acting on the
+            # agent's say-so, so the run says so instead.
+            problem = handoff.ambiguous or handoff.refused
+            self.transcript.append(
+                direction="harness->agent",
+                kind="int1_ambiguous_input" if handoff.ambiguous else "int1_path_refused",
+                text=problem)
+            with self._int1_lock:
+                entry["result"] = {"status": "error", "reason": problem}
+            self._reply(inbox, msg["message_id"], {"status": "error", "reason": problem})
             return
 
         pconf = profiles["provider"]
         agent = agents.SandboxedClaude(
             "provider", self.provider_root, pconf["profile_path"], pconf["jail_home"],
             pconf["env"], model=self.model)
+        # Published before the check, so a finish() that lands between the two still has
+        # an agent to stop: kill() before run() stops it as it starts.
+        self._ref_agent = agent
+        if self._finishing.is_set():
+            with self._int1_lock:
+                entry["result"] = {"status": "not_started_at_finish"}
+            return
         rc, out, err, rec = agent.run(
             handoff.brief(), timeout=config.TIMEOUT_PROVIDER,
-            log_path=os.path.join(self.vault_dir, "provider.jsonl"))
+            log_path=os.path.join(self.vault_dir, "provider.jsonl"), new_session=True)
         self.manifest.agent("provider", invocations=agent.invocations)
+        if self._finishing.is_set():
+            # finish() stopped this provider because the PRS agent had already exited.
+            # Nothing is delivered: nobody is left to read it, and the transcript's count has
+            # been or is about to be taken.
+            with self._int1_lock:
+                entry["result"] = {"status": "stopped_at_finish", "provider_rc": rc}
+            return
 
         art, problem = handoff.read_artifact()
         if art is None:
             self.transcript.append(direction="provider->agent", kind="int1_unavailable",
                                    text=problem or "")
-            self._int1[-1]["result"] = {"status": "unavailable", "reason": problem}
+            with self._int1_lock:
+                entry["result"] = {"status": "unavailable", "reason": problem}
             self._reply(inbox, msg["message_id"],
                         {"status": "unavailable", "reason": problem})
             return
 
-        dest = os.path.join(self.prs_root, "runs", self.run_id, "interpret",
-                            "provider_reference.json")
-        delivery = handoff.deliver_to(dest)
+        delivery = handoff.deliver_to(os.path.realpath(self.prs_root), self.run_id)
+        dest = delivery["to"]
         # The artifact is copied and hashed at both ends. It is not validated here --
         # reference_adapter.py is what validates it against the contract, and pre-empting
-        # that would move a judgment out of the pipeline and into the harness.
+        # that would move a judgment out of the pipeline and into the harness. Not even its
+        # being an object: a non-object is delivered and the adapter says what it is.
+        if not isinstance(art, dict):
+            art = {}
         usable = art.get("usable")
-        self._int1[-1]["result"] = {
-            "status": "delivered" if usable is not False else "unusable",
-            "usable": usable, "reason": art.get("reason"),
-            "n_participants": art.get("n_participants"),
-            "source": art.get("source"), "delivery": delivery,
-            "provider_rc": rc,
-        }
+        with self._int1_lock:
+            entry["result"] = {
+                "status": "delivered" if usable is not False else "unusable",
+                "usable": usable, "reason": art.get("reason"),
+                "n_participants": art.get("n_participants"),
+                "source": art.get("source"), "delivery": delivery,
+                "provider_rc": rc,
+            }
         self.transcript.append(
             direction="provider->agent",
             kind="int1_artifact" if usable is not False else "int1_refusal",
             text=str(art.get("reason") or ""),
             meta={"usable": usable, "delivery": delivery})
 
+        rel = os.path.relpath(dest, os.path.realpath(self.prs_root))
         if usable is False:
             self._reply(inbox, msg["message_id"],
                         {"status": "unusable", "reason": art.get("reason"),
-                         "artifact_path": os.path.relpath(dest, self.prs_root)})
+                         "artifact_path": rel})
         else:
             self._reply(inbox, msg["message_id"],
-                        {"status": "delivered",
-                         "artifact_path": os.path.relpath(dest, self.prs_root)})
+                        {"status": "delivered", "artifact_path": rel})
 
     def _check_unclaimed_request(self):
         """After the run: did the agent write a request and never hand it over?
@@ -1756,6 +1971,30 @@ class Orchestrator:
         if self.backend:
             self.manifest.agent("person_backend_close", **(self.backend.close() or {}))
 
+        # A provider thread can outlive the PRS agent. Its result would never be read, so
+        # it is stopped rather than waited out -- the build can run for hours after nobody
+        # is left to use it, and once the harness exits nothing would enforce its timeout.
+        self._finishing.set()
+        still_running, stopped, not_stopped = [], None, []
+        for t in self._ref_threads:
+            t.join(timeout=10)
+            if t.is_alive():
+                still_running.append(t.name)
+        if still_running:
+            ag = self._ref_agent
+            stopped = ag.kill() if ag is not None else False
+            for t in self._ref_threads:
+                t.join(timeout=60)
+            not_stopped = [t.name for t in self._ref_threads if t.is_alive()]
+            self.manifest.caveat(
+                "A reference provider was still running when the PRS agent exited (%s). It "
+                "was %s, and nothing it produced was delivered to or read by the agent.%s"
+                % (", ".join(still_running),
+                   "stopped" if stopped else "told to stop; no provider process was running "
+                   "at that moment, and one that starts after this is stopped as it starts",
+                   (" Its thread had still not returned 60 s later (%s)."
+                    % ", ".join(not_stopped)) if not_stopped else ""))
+
         routing_errors = []
         while True:
             try:
@@ -1769,8 +2008,13 @@ class Orchestrator:
             self.manifest.caveat("%d message(s) failed to route: %s"
                                  % (len(routing_errors), routing_errors[:5]))
 
-        self.manifest.set("int1", {"handoffs": self._int1,
-                                   "n_handoffs": len(self._int1),
+        with self._int1_lock:
+            handoffs = json.loads(json.dumps(self._int1, default=str))
+        self.manifest.set("int1", {"handoffs": handoffs,
+                                   "n_handoffs": len(handoffs),
+                                   "provider_still_running_at_finish": still_running,
+                                   "provider_stopped_at_finish": stopped,
+                                   "provider_thread_alive_after_stop": not_stopped,
                                    "routing_errors": routing_errors,
                                    "unclaimed_request": self._check_unclaimed_request()})
         self.manifest.set("network", {
@@ -1885,7 +2129,8 @@ class Orchestrator:
             "answers_received": getattr(self, "_answers_seen", 0),
             "routing_errors": len(routing_errors),
             "int1_arm_exercised": any(
-                h["staging"]["inputs_match_requested_model"] for h in self._int1),
+                (h.get("staging") or {}).get("inputs_match_requested_model")
+                for h in handoffs),
             "what_this_run_can_and_cannot_test": what_tested,
         })
 
@@ -2381,10 +2626,13 @@ class Orchestrator:
                 "-- this run has no score. Check the score skill's polling section."
                 % ", ".join("pid %s" % p["pid"] for p in alive))
             return
-        n, skipped = _chmod_tree(self.sandbox_root, 0o444, 0o555)
+        shared = []
+        n, skipped = _chmod_tree(self.sandbox_root, 0o444, 0o555, shared=shared)
         self.manifest.set("sandbox_frozen", {
             "root": self.sandbox_root, "frozen": True,
             "files": n, "symlinks_skipped": skipped,
+            "hardlinked_files_left_alone": len(shared),
+            "hardlinked_files_sample": shared[:20],
             "note": ("Symlinks are never chmod'd. os.walk lists a symlink-to-directory among "
                      "its dirs and os.chmod follows symlinks, so this loop previously "
                      "changed the mode of the real ~/Library/Keychains through the jail "

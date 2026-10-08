@@ -53,6 +53,17 @@ THE STEPS, IN ORDER
                   agent/tools/panel_index.py, is gitignored here and tracked only in the
                   private repo (build-answer-side/tools/); SETUP.md section 6 copies it in.
                   Without it the step reports the index missing and says where to get it.
+  panel_snv       panel-snv/chrN.snv.vcf.gz and .tbi, N = 1..22: the phase3 VCFs filtered to
+                  biallelic SNVs with exact duplicates collapsed, all 2,504 samples -- the
+                  reference agent/tools/impute_joint.py --panel-dir reads, dropping each run's
+                  hold-out at read time. `bcftools view --no-version -m2 -M2 -v snps |
+                  bcftools norm --no-version -d exact -Oz1`, then `bcftools index -t`.
+                  bcftools/htslib 1.19 (Ubuntu 24.04) reproduces the working box's files bit
+                  for bit (checked on chr22). Another version may compress differently: the
+                  step then STOPS on the first chromosome, leaving its .part files named, and
+                  that is a different compression, not necessarily a different panel. About
+                  6 h of CPU and 16 GB, one chromosome at a time, so several hours of wall
+                  clock.
   liftover        bin/liftOver is checked, never built. setup.sh downloads UCSC's current
                   build, and the working box's copy matches no public build found, so any
                   other copy reports NOT-REPRODUCED.
@@ -121,6 +132,54 @@ FASTA_STREAM_SHA256 = "3a3872e7bdd1532fdbfbc3afd70c04ff8a12a109319ae050c91d962f3
 # .bin can match after a rebuild.
 SITES_INDEX_BIN = ("29d3a34eb30647aed44c573373a90c1b48e915fd52920eb68b13dbcc749129a0", 392181824)
 SITES_INDEX_JSON = "5e834f077c6403e5cbd8882790163639797b2db9e31f90aced7acdb19426c76b"
+# panel-snv: {chromosome: ((sha256, bytes) of chrN.snv.vcf.gz, (sha256, bytes) of its .tbi)},
+# from the working box on 2026-10-08, bcftools/htslib 1.19.
+PANEL_SNV = {
+    1: (("86ae988b37d2326f39094bc0900146096c03961c6516693e7d74db2b0e731f7b", 1282272335),
+         ("1671c8f358db6148cb46f0b94ac5a95a2db4af3a56046d9b4abb346acd34aedf", 205980)),
+    2: (("f855a1f3965c588cbec845eb05c12be3b9534d292d92cf5f198c8bfcca078866", 1383778211),
+         ("55ce1568286cf03ca32eca451b11f1292c6bc73ca73331ce00b7b362b0f00927", 218580)),
+    3: (("ea0dad33073254152d6afe3e055f22651f7581ed0e3d6793ccab7a664b0a787c", 1167723917),
+         ("88b94be7652878852f57e09b92f966c55ab54e944de0a4beee690e0545d509d9", 179524)),
+    4: (("3f3f37d623bc350ab3270491d1b82e2b605ad2e613b2a271d63fb4de3f3bfa9b", 1182787089),
+         ("734fcc64985fa6ee6faa0acf82c7942cbd2476cd90e4aef549de5db4cfa898e4", 172423)),
+    5: (("ed58b7dca27336b78004b6d73fe4b7ed8992a52792f54615b5604a8a74ed95c7", 1040995512),
+         ("34ca900ffbdc825c0bb90086b66376d90089a3e43fdeafc0488a8fcc7d5ee201", 162728)),
+    6: (("83c9739eb57c4c5783182b928f453d82696d19413ae41a2478b1716afd547350", 1059377579),
+         ("f782fefe551d5bdc3b099c096963ce8cca8c6dcd8001d50e12b5dc707503bf65", 154081)),
+    7: (("bae9180f28e812030a4ad0ab1dddbb62c168a62567bc126bb91d7e3fd8e2456f", 962595416),
+         ("1fe5a6d42aeb107f15542595611b73f98d187fb34a9391535ead4481208e59ff", 143774)),
+    8: (("019f73e5fb8b2765e39a9f734b219a26805766e2d2d45706812a596ed9427e41", 916624631),
+         ("2c22a4928513e82dfd00ca9a3fc07f9b998c186c0bd4dd8416bcd9a4aaa30645", 131983)),
+    9: (("e25c8381e7fd96e0aeb38aabe4a970edcb2029ef4d624586aebbbc9ad54510df", 713167898),
+         ("d9db5bfcf7626d1fc4276d54b70af518c1106a2c0da3c0feec9ea95b066036a2", 109113)),
+    10: (("654904cc5031aa0376b3a9f5597e839a3c3f6fd442bdafce449353216099f793", 820048454),
+         ("5ac48f3c226f92796651cfda81400c3a00ba58b4a6f4d66554167a9dd5564228", 120266)),
+    11: (("997c7e30dec71024a7d06a00eabddf4d6c8bbeeaa44a7a242e2eda865904eaa3", 812366413),
+         ("b5e6046d61f35675633e6642f11eeea36b96550549903c2a9f2db3eea6de1768", 120441)),
+    12: (("1bc207ac1cb3b179c6f6844bd18ddedf2258546936c78534f87865a6257948e2", 778913231),
+         ("e653ef645f80dc56f72ccd8323860a89015d08031b4a59630f94f07327f24eec", 119306)),
+    13: (("31e81096a1887a9379bf4ed05935eb910f5b7fdc1d728380a3b7bf551df6ceb3", 586387281),
+         ("ff68376a5d2e60e7a2d86e8b0391c9a231a47c93d5b84f2157e289d880378c7e", 86708)),
+    14: (("f9f23e0045a7c07c8974c1d74df0695245c93d405a078366d41bb9af013d82d5", 533145575),
+         ("3a36e3c5e2dc9872609a1aa2d52079508a25e22550a8ef8eab073e7ca10127f0", 80570)),
+    15: (("e8645bb8d377fcb8becbca7dfcf175c0231ecae6af327b1764f056ebbc9571e3", 481789520),
+         ("37cf5142b37ee2840a68720a0385cb9461d90ad7fd21ef5f9cfd22c5fda0e1d3", 74301)),
+    16: (("6cd70c070801b665795f6f3c1880a89dd73617f783e7ccfa10dfc77a87641d42", 525260449),
+         ("a826eab97df363822fda33dea34afe0cb05feb3fa2cbc0c9a26999596d677b6c", 72370)),
+    17: (("64350ff3e5185f0e7b2c82066dbc02facd3b55f7490853815dd46e3096921f8e", 453761726),
+         ("cbd2ed5af01f94a2fb6876c6e162d2b0ae91be9e9f1c422ce926eb6c9e568bfa", 71032)),
+    18: (("aac719307394514bb14d71016621b94bc9034d8fbb513bb14ca31560522469f8", 462741154),
+         ("f3c855707317cd38b2f52a894757bb276dd6a208229b6d2b86c72b66f75753be", 68411)),
+    19: (("166458ffb3e92ecba0d0f60bda720273ebf1833d64fbb5eb6cb9c85cd2b3410b", 378771757),
+         ("4aebdae1300ad6b286e0156cdf45c8f957bfa2c3e73fc6d4125cd0c256b951c1", 50576)),
+    20: (("9f6c4c054f7e25241832634b46f624d82e6542410bc26aebf7c6c4b130f19f9c", 362420233),
+         ("b27cbd70825d56e682f597c3a4207a5559af09bcd4a40b90a362ca3d52311bc7", 54051)),
+    21: (("2fcb90183457d17466d4cc7df956d03f2aad77c6845e7f907e63e596b48ba149", 231039556),
+         ("0c68d22239a231728da20a70ceb0085e207a048fc6b8082440455866dd86a3a5", 32659)),
+    22: (("eb4c47c6d0e0b5ae92b07b9043919bdfdf7758b56d351906d97ef11f9b06f317", 226294758),
+         ("d298a6dd1b084b809c6bca22fde4167ac7fcb4042604d27b749766ae2acb07b3", 32375)),
+}
 # The working box's liftOver. Checked only: see step_liftover.
 LIFTOVER = ("6529f91135d579f18d1d86681810cdd0150bf6d7531457baa79a6632706368c0", 30663104)
 
@@ -724,7 +783,7 @@ def step_hgdp_basis(rd, mode):
     cmd = [sys.executable, ANCESTRY_PY, "build-ref",
            "--ref-pfile", rd.p("refdata/ancestry-ref/hgdp_1kgp/" + HGDP_STEM),
            "--panel", rd.p("refdata/ancestry-ref/hgdp_1kgp.panel")] + BASIS_ARGS + \
-          ["--out-dir", stage]
+          ["--out-dir", stage, "--keep-intermediates"]  # BASIS_EXACT checks ref_raw/ref_nonpal
     print("  " + " ".join(cmd))
     print("  (about 10 minutes on 8 CPUs)")
     try:
@@ -806,6 +865,66 @@ def step_sites_index(rd, mode):
             ("ok" if same else "TEXT", "panel/sites_index.json  (timestamp, bcftools version)")]
 
 
+def step_panel_snv(rd, mode):
+    rows = []
+    for n in range(1, 23):
+        rel = "panel-snv/chr%d.snv.vcf.gz" % n
+        dst = rd.p("refdata/" + rel)
+        tbi = dst + ".tbi"
+        (vsha, vsize), (tsha, tsize) = PANEL_SNV[n]
+        if mode == "plan":
+            rows.append(("present" if os.path.exists(dst) else "planned", rel))
+            continue
+        refuse_stale(dst + ".part", tbi + ".part")  # named before anything is read
+        have = [(state(dst, vsha, vsize), rel), (state(tbi, tsha, tsize), rel + ".tbi")]
+        if mode == "check" or all(st == "ok" for st, _ in have) or any(
+                st == "BAD" for st, _ in have):
+            rows.extend(have)
+            continue
+        if os.path.exists(dst) or os.path.exists(tbi):
+            # One of the pair without the other: reported, not rebuilt. Move the one that is
+            # here aside and rerun to build both.
+            rows.extend(have)
+            continue
+        src = rd.entry("phase3_chr%d" % n)
+        if state(rd.p(src["path"]), src["sha256"], src["bytes"]) != "ok":
+            rows.append(("missing", rel + "  (not built: %s missing or wrong; "
+                         "fetch_refdata.py --verify)" % short(src["path"])))
+            continue
+        need_tools("bcftools")
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        print("  chr%d: bcftools view -m2 -M2 -v snps | norm -d exact  (minutes to half an hour)" % n)
+        view = norm = None
+        try:
+            view = subprocess.Popen(["bcftools", "view", "--no-version", "-m2", "-M2", "-v",
+                                     "snps", rd.p(src["path"]), "-Ou"], stdout=subprocess.PIPE)
+            norm = subprocess.Popen(["bcftools", "norm", "--no-version", "-d", "exact", "-Oz1",
+                                     "-o", dst + ".part"], stdin=view.stdout)
+            view.stdout.close()  # so view sees SIGPIPE, not a blocked write, if norm dies
+            if norm.wait() != 0 or view.wait() != 0:
+                raise Stop("chr%d: bcftools view | norm failed" % n)
+            subprocess.run(["bcftools", "index", "-t", "-o", tbi + ".part", dst + ".part"],
+                           check=True)
+        except BaseException:
+            for proc in (view, norm):
+                if proc is not None and proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
+            for p in (dst + ".part", tbi + ".part"):
+                if os.path.exists(p):
+                    os.unlink(p)
+            raise
+        got = [state(dst + ".part", vsha, vsize), state(tbi + ".part", tsha, tsize)]
+        if got != ["ok", "ok"]:
+            raise Stop("chr%d: rebuilt panel does not match (sha256 %s); left as %s.part. "
+                       "A bcftools/htslib other than 1.19 compresses differently."
+                       % (n, sha256_of(dst + ".part"), rel))
+        os.rename(tbi + ".part", tbi)
+        os.rename(dst + ".part", dst)
+        rows.extend([("ok", rel + "  (built)"), ("ok", rel + ".tbi  (built)")])
+    return rows
+
+
 def step_liftover(rd, mode):
     """bin/liftOver: checked, never built. setup.sh downloads UCSC's current build, which
     changed on 2026-09-09; the working box's copy matches no public build found."""
@@ -826,7 +945,7 @@ STEPS = [("manifest", step_manifest), ("plink2", step_plink2), ("hgdp_1kgp", ste
          ("hgdp_panel", step_hgdp_panel), ("phase3_markers", step_phase3_markers),
          ("fasta", step_fasta), ("maps", step_maps), ("jre", step_jre),
          ("hgdp_basis", step_hgdp_basis), ("sites_index", step_sites_index),
-         ("liftover", step_liftover)]
+         ("panel_snv", step_panel_snv), ("liftover", step_liftover)]
 
 
 class Args(argparse.ArgumentParser):

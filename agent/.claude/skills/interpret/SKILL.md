@@ -38,32 +38,88 @@ The ancestry grouping in the request is **the same quantity `ANC-1` produced** (
 flows `ANC-1` → interpret → `DATA-6`, which versions it. **Do not re-derive or re-label it
 here.**
 
-## 2. Call the provider
+The request also carries the file your raw score was computed from
+(`runs/<RUN_ID>/score/plink_score_input.tsv`, as `score_plink2.py` recorded it) with the hash
+`score_plink2.py` took when it scored, plink's own counts and its version. The provider scores
+the reference cohort from that same file. If the file has changed since you scored,
+`interpret_request.py` stops and says so: re-run `score_plink2.py` on the current file first,
+because a reference scored from different bytes is not a reference for your raw score. Every
+path in the request must lie inside `runs/<RUN_ID>/`; the harness refuses one that does not.
+
+## 2. Ask the provider, and collect the answer
+
+Building a reference can take hours, longer than one command is allowed to run. So send the
+request without waiting:
+
+```bash
+python3 comms/harness_client.py request-reference --no-wait \
+  --request runs/<RUN_ID>/interpret/request.json
+```
+
+It prints a request id (`r-...`) at once. Collect the reply with calls that each fit inside one
+command, and repeat while the exit code is 6. **Give each of these Bash calls a 600000 ms
+timeout** (the default is 2 minutes, which kills the call before `--timeout 540` returns, and
+then you never see exit 6); `--timeout 540` makes the command itself return first:
+
+```bash
+python3 comms/harness_client.py await-reference --id <that id> --timeout 540
+```
+
+A run of these, nine minutes each, is the expected shape of this step while a reference is
+built -- it can take hours. Do not replace it with a bare `sleep` or an unbounded wait.
+
+You can still ask the person questions while it runs. Send one reference request at a time.
+
+| client exit | what it means | what you do |
+|---|---|---|
+| 6 | still running | run `await-reference` again |
+| 0 | the provider answered; the artifact's path is printed | pass that path to the adapter below |
+| 3 | no usable reference could be built, or none was supplied | if a path is printed after the message, pass it to the adapter, which records the refusal; if not, run the adapter without `--reference` |
+| 5 | the harness did not hand the request over, or replied with something unexpected; the reason is printed | not a reference outcome. If it says a request is already being built, it prints that request's id: collect that one with `await-reference --id <it>`. If the reason says a path is not inside your run, the request named a file it should not have — rebuild it from this run's own files. Otherwise record the stage `blocked` with the printed reason |
+| 4 | only from the blocking form (without `--no-wait`): nobody replied in time | the request is still being built and its id is printed; collect it with `await-reference --id <it>` rather than sending another |
+
+Then validate what came back. **This is the only thing that reads the artifact for you:**
 
 ```bash
 python3 tools/reference_adapter.py --run <RUN_ID> \
   --request runs/<RUN_ID>/interpret/request.json \
-  --reference <provider artifact> \
+  --reference <the path the client printed> \
   --out runs/<RUN_ID>/interpret/reference_response.json
 ```
 
-| exit | what it means | what you do |
+| adapter exit | what it means | what you do |
 |---|---|---|
-| 0 | a usable reference was built | go to §3 |
+| 0 | a usable reference was built, for this model and this score input | go to §3 |
 | 5 | the provider could not build a usable one | **`INT-2`'s refusal, a correct outcome** (`JC-6`). Record `refuse` with the provider's reason and the participant count, and hand to `report`, which still has something honest to say |
-| 3 | no provider answered | the adapter has written a `blocked` ledger entry. Leave the stage's judgment unmade, because none was made. **Do not record `stop`** — the data is not broken |
+| 4 | the artifact fails the contract, contradicts itself, or is not for this request: a different model or scoring file, a different score input from yours, counts that do not support the parity it claims, reference scores with missing genotypes filled as zero dosage, or malformed numbers | the adapter has written a `blocked` ledger entry with the detail. **Use no number from the artifact.** Leave the stage's judgment unmade and say why; this is not the provider refusing and not `stop` |
+| 3 | no artifact was supplied | the adapter has written a `blocked` ledger entry. Leave the stage's judgment unmade, because none was made. **Do not record `stop`** — the data is not broken |
 
 ## 3. Place the score, and carry the caveats forward
 
-Take the percentile from the returned distribution. Then read `warnings_for_report` and
-**carry every warning into report.** They are not decoration:
+`reference_response.json` carries `placement`: of the `n` reference participants' raw scores,
+how many are below (`n_below`), equal to (`n_equal`) and above (`n_above`) this person's raw
+score. They are counted by exact comparison, with no interpolation — but of rounded numbers:
+plink2 prints each score to a fixed precision, and your raw score is a sum of per-chromosome
+printed values, so a reference score within that rounding of yours could sit on either side
+(`placement.note`). Say where the person stands from the counts — for example "higher than
+`n_below` of the `n` people in the comparison group" — and if a count is close to a boundary
+that matters, say that it rests on rounded scores. If you also give a percentile, say how you
+turned the counts into one (how ties and the person's own position are counted): that is a
+convention you chose, not a measurement. **Never read a position off the quantiles by
+interpolating between them** — that is the approximate percentile this stage forbids.
+
+Then read `warnings_for_report` and **carry every warning into report.** They are not
+decoration:
 
 - **`INT-4`, assay match.** An array-derived score placed against a WGS-derived reference
-  bakes the imputed-versus-complete bias straight into the percentile. If the layers do
-  not match, the report says so.
-- **`scoring_parity`.** If reference individuals were scored over all model positions while
-  this person was scored over the resolved subset, the percentile is biased and the report
-  says so.
+  bakes the imputed-versus-complete bias straight into the percentile. The adapter does not
+  decide whether the layers match from how they are worded; unless the provider stated it,
+  the warning gives both descriptions and the judgment is yours. If they do not match, the
+  report says so.
+- **`scoring_parity`.** `same-resolved-set` means the cohort was scored from your own score
+  input and plink used every one of its variants on both sides. Anything else — `other` with
+  the provider's counts, or `full-model-set` — means the two scores cover different variants,
+  the placement is biased, and the report says so.
 - **`INT-5`, the membership rule.** A cohort is a set and needs either a discrete label or a
   distance cutoff, while the math treats ancestry as continuous. That fork is unresolved.
   **Name whichever rule the provider used in the report**, rather than hiding it.
@@ -85,8 +141,10 @@ python3 tools/record.py --run <RUN_ID> --stage interpret --name interpret --judg
 {
   "decision": "...", "outcome": "score|refuse|stop|ask",
   "requirement_ids": ["INT-1", "INT-2", "INT-4"],
-  "percentile": null, "reference": {"source": "...", "version_string": "...", "n": 0,
-                                    "assay_layer": "...", "scoring_parity": "..."},
+  "placement": {"n": 0, "n_below": 0, "n_equal": 0, "n_above": 0},
+  "percentile": null, "percentile_convention": null,
+  "reference": {"source": "...", "version_string": "...", "n": 0,
+                "assay_layer": "...", "scoring_parity": "..."},
   "caveats_for_report": ["..."],
   "reasons": ["..."],
   "evidence": [{"source": "runs/<RUN_ID>/interpret/reference_response.json", "field": "..."}]

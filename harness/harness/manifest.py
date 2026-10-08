@@ -10,11 +10,13 @@ Two things it deliberately records that are not flattering: what the token grep 
 scan, and what the Spotlight index already contained before the run started.
 """
 import getpass
+import hashlib
 import json
 import os
 import platform
 import socket
 import subprocess
+import threading
 import time
 
 from . import auth, config
@@ -26,22 +28,26 @@ class Transcript:
     def __init__(self, path):
         self.path = path
         self.n = 0
+        # The router and a provider thread both append. Without the lock two records can
+        # take the same seq, or interleave inside one line of the JSONL.
+        self._lock = threading.Lock()
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
 
     def append(self, direction, kind, text="", question_id=None, meta=None):
-        self.n += 1
-        rec = {
-            "seq": self.n,
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "direction": direction,
-            "kind": kind,
-            "question_id": question_id,
-            "text": text,
-            "meta": meta or {},
-        }
-        with open(self.path, "a") as fh:
-            fh.write(json.dumps(rec, sort_keys=False) + "\n")
-            fh.flush()
+        with self._lock:
+            self.n += 1
+            rec = {
+                "seq": self.n,
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "direction": direction,
+                "kind": kind,
+                "question_id": question_id,
+                "text": text,
+                "meta": meta or {},
+            }
+            with open(self.path, "a") as fh:
+                fh.write(json.dumps(rec, sort_keys=False) + "\n")
+                fh.flush()
         return rec
 
     def read(self):
@@ -57,6 +63,17 @@ class Transcript:
                     except json.JSONDecodeError:
                         pass
         return out
+
+
+def _sha256_or_none(path):
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
 
 
 def host_facts():
@@ -76,27 +93,94 @@ def host_facts():
         "arch": platform.machine(),
         "python": platform.python_version(),
         "claude_cli": _v(["claude", "--version"]),
-        "plink2": _v([os.path.join(config.REFDATA_SRC, "bin", "plink2"), "--version"]),
+        # Hashed, not executed: the binary is the same inode as every run clone's (cp -al), so
+        # running it here as the harness user would make the host trust every sandbox's
+        # read-only bind having held. The sha256 identifies the build exactly.
+        "plink2_sha256": _sha256_or_none(os.path.join(config.REFDATA_SRC, "bin", "plink2")),
         "bcftools": _v(["bcftools", "--version"]),
         "sandbox_exec": os.path.exists("/usr/bin/sandbox-exec"),
     }
 
 
 def source_revision():
-    """What the agent's source looked like, read by the harness -- never by the agent."""
-    def _git(*args):
+    """The commit this run launched from, and whether the tree matched it, read by the harness
+    at launch -- never by the agent.
+
+    Three things the previous version got wrong, each of which made a corpus impossible to
+    freeze from its own manifests: a git failure read as clean (bool(None) is False), an
+    untracked scratch file read as dirty, and a dirty tree recorded no trace of what differed.
+    So: dirty is True/False only when git answered, None when it did not; it counts tracked
+    changes, staged or not, and untracked files are listed separately; and a dirty tree
+    records its changed paths and the sha256 of `git diff HEAD`. The diff's format is pinned
+    (no external diff, no textconv, no colour, no rename detection, fixed prefixes, full
+    index lines) so the hash depends on the tree, not on whoever's git config ran it. Any git
+    call that failed is named in git_errors and its field is null, never an empty answer."""
+    errors = []
+
+    def _git(*args, raw=False):
         try:
-            r = subprocess.run(["git", "-C", config.AGENT] + list(args),
-                               capture_output=True, text=True, timeout=20)
-            return (r.stdout or "").strip() or None
-        except Exception:  # noqa: BLE001
+            r = subprocess.run(["git", "-C", config.PRODUCT_ROOT] + list(args),
+                               capture_output=True, timeout=20)
+        except Exception as exc:  # noqa: BLE001
+            errors.append("git %s: %s" % (args[0], exc))
             return None
+        if r.returncode != 0:
+            errors.append("git %s: exit %d" % (args[0], r.returncode))
+            return None
+        return r.stdout if raw else r.stdout.decode(errors="replace")
+
+    head = _git("rev-parse", "HEAD")
+    head = head.strip() if head else None
+    # -z: NUL-separated, paths never quoted; a rename record is followed by its source path.
+    tracked = _git("status", "--porcelain=v1", "-z", "--untracked-files=no")
+    changed = []
+    if tracked:
+        fields = tracked.split("\0")
+        i = 0
+        while i < len(fields):
+            rec = fields[i]
+            i += 1
+            if not rec:
+                continue
+            code, path = rec[:2], rec[3:]
+            if code[0] in "RC" or code[1] in "RC":
+                changed.append({"path": path, "from": fields[i] if i < len(fields) else None})
+                i += 1
+            else:
+                changed.append(path)
+    untracked = _git("ls-files", "-z", "--others", "--exclude-standard")
+    diff = None
+    if tracked:
+        diff = _git("-c", "core.quotepath=off", "diff", "--no-ext-diff", "--no-textconv",
+                    "--no-color", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/",
+                    "--full-index", "--binary", "HEAD", raw=True)
+    tags = _git("tag", "--points-at", "HEAD") if head else None
+    dirty = None if (head is None or tracked is None) else bool(changed)
+    root = _git("rev-parse", "--show-toplevel")
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD")
     return {
-        "build_head": _git("rev-parse", "HEAD"),
-        "build_dirty": bool(_git("status", "--porcelain")),
-        "note": "Read by the harness for provenance. agent/.git is never staged and is on "
-                "the denial probe list -- its commit subject lines alone leak the prior "
-                "run's ancestry call.",
+        "repo_root": root.strip() if root else None,
+        "commit": head,
+        "branch": branch.strip() if branch else None,
+        "tags_at_commit": tags.split() if tags is not None else None,
+        "dirty": dirty,
+        "dirty_means": "tracked files differ from the commit, staged or not; untracked files "
+                       "are listed separately and do not count. null = git did not answer.",
+        "changed_paths": changed[:200] if tracked is not None else None,
+        "n_changed_paths": len(changed) if tracked is not None else None,
+        "diff_head_sha256": hashlib.sha256(diff).hexdigest() if diff else None,
+        "diff_format": "git diff --no-ext-diff --no-textconv --no-color --no-renames "
+                       "--src-prefix=a/ --dst-prefix=b/ --full-index --binary HEAD",
+        "git_version": (lambda v: v.strip() if v else None)(_git("--version")),
+        "untracked_paths": ([u for u in untracked.split("\0") if u][:200]
+                            if untracked is not None else None),
+        "git_errors": errors,
+        # Kept under their old names so earlier readers of the manifest still find them.
+        "build_head": head,
+        "build_dirty": dirty,
+        "note": "Read by the harness at launch, for provenance. The repository's .git is never "
+                "staged and is on the denial probe list -- its commit subject lines alone can "
+                "leak a prior run's ancestry call.",
     }
 
 
@@ -106,6 +190,9 @@ class Manifest:
         self.dir = vault_dir
         self.path = os.path.join(vault_dir, "manifest.json")
         os.makedirs(vault_dir, exist_ok=True)
+        # A provider thread records its invocations while the main thread may be writing;
+        # a dict changed mid-write fails the write.
+        self._lock = threading.RLock()
         self.data = {
             "run_id": run_id,
             "harness_version": "1.0",
@@ -125,16 +212,23 @@ class Manifest:
         }
 
     def set(self, key, value):
-        self.data[key] = value
+        with self._lock:
+            self.data[key] = value
         return value
 
     def agent(self, name, **fields):
-        self.data["agents"].setdefault(name, {}).update(fields)
+        with self._lock:
+            self.data["agents"].setdefault(name, {}).update(fields)
 
     def caveat(self, text):
-        self.data["caveats"].append(text)
+        with self._lock:
+            self.data["caveats"].append(text)
 
     def write(self):
+        with self._lock:
+            return self._write()
+
+    def _write(self):
         self.data["finished_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         tmp = self.path + ".tmp"
         with open(tmp, "w") as fh:

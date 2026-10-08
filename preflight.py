@@ -94,7 +94,7 @@ def check_host_binaries():
         ("bcftools", "used by the normalisation tools", "apt-get install -y bcftools"),
         ("java", "Beagle, only needed if scoring runs", "apt-get install -y default-jre"),
         ("node", "Claude Code runs on it", "apt-get install -y nodejs npm"),
-        ("claude", "the agent under test", "npm install -g @anthropic-ai/claude-code@2.1.224"),
+        ("claude", "the agent under test", "npm install -g @anthropic-ai/claude-code@2.1.293"),
     ):
         p = shutil.which(name)
         if p:
@@ -308,11 +308,11 @@ def check_sandbox_works():
 def check_cli():
     rc, out = run(["claude", "--version"])
     v = out.strip().split()[0] if rc == 0 and out.strip() else "?"
-    if v.startswith("2.1.224"):
+    if v.startswith("2.1.293"):
         note(OK, "claude version", v)
     else:
-        note(WARN, "claude is not pinned to 2.1.224", v,
-             "npm install -g @anthropic-ai/claude-code@2.1.224 -- and re-pin AFTER "
+        note(WARN, "claude is not pinned to 2.1.293", v,
+             "npm install -g @anthropic-ai/claude-code@2.1.293 -- and re-pin AFTER "
              "every sign-in, because signing in upgrades it")
 
     rc, out = run(["node", "--version"])

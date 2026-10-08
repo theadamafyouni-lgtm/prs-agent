@@ -49,19 +49,53 @@ def open_maybe_gz(p):
     return gzip.open(p, "rt", errors="replace") if p.endswith(".gz") else open(p, errors="replace")
 
 
-def load_imputed(imputed_dir):
-    """chrom,pos -> (ref, alt, dr2, imputed_flag). Beagle puts DR2 and the IMP flag in INFO."""
+def model_positions(path, chr_col, pos_col):
+    """(chrom, pos) of every parseable model row: the only positions this tool ever looks up."""
+    keys = set()
+    with open_maybe_gz(path) as fh:
+        cols = None
+        for line in fh:
+            if line.startswith("#"):
+                continue
+            f = line.rstrip("\n").split("\t")
+            if cols is None:
+                cols = {n: i for i, n in enumerate(f)}
+                for need in (chr_col, pos_col):
+                    if need not in cols:
+                        raise SystemExit(f"column {need!r} absent. Present: {sorted(cols)}")
+                continue
+            try:
+                keys.add((f[cols[chr_col]].strip(), int(f[cols[pos_col]].strip())))
+            except (ValueError, IndexError):
+                continue
+    return keys
+
+
+def load_imputed(imputed_dir, wanted, targets_path):
+    """chrom,pos -> (ref, alt, dr2, imputed_flag) for the model's positions only. Beagle puts DR2
+    and the IMP flag in INFO.
+
+    Only the model's positions are kept: Beagle writes every panel marker, ~78M for the genome,
+    and holding all of them in one dict needs ~22 GB -- more than the box has. bcftools does the
+    filtering (-T, streamed), so the records kept, their order, and which record wins when a
+    position appears twice are all exactly what the unfiltered read produced."""
     table = {}
     files = sorted(glob.glob(os.path.join(imputed_dir, "*.vcf.gz")))
     if not files:
         raise SystemExit(f"match_variants.py: no imputed VCFs in {imputed_dir}")
+    if not wanted:
+        # No model row has a usable coordinate. bcftools refuses an empty targets file, and
+        # the honest result is every row unresolved, which main() produces from an empty table.
+        return table, files
+    with open(targets_path, "w") as fh:
+        for c, p in sorted(wanted, key=lambda k: (k[0], k[1])):
+            fh.write(f"{c}\t{p}\n")
     for f in files:
-        cmd = ["bcftools", "query", "-f", "%CHROM\t%POS\t%REF\t%ALT\t%INFO/DR2\t%INFO/IMP\n", f]
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        if proc.returncode != 0:
-            raise SystemExit(f"match_variants.py: bcftools query failed on {f}\n{proc.stderr[-2000:]}")
-        for line in proc.stdout.splitlines():
-            c, p, ref, alt, dr2, imp = line.split("\t")
+        cmd = ["bcftools", "query", "-T", targets_path,
+               "-f", "%CHROM\t%POS\t%REF\t%ALT\t%INFO/DR2\t%INFO/IMP\n", f]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        for line in proc.stdout:
+            c, p, ref, alt, dr2, imp = line.rstrip("\n").split("\t")
             # A multiallelic panel site carries one DR2 per ALT. Rather than silently picking one
             # -- which would attach a quality figure to the wrong allele -- such sites are marked
             # and left for the matcher to treat as unresolvable.
@@ -73,13 +107,32 @@ def load_imputed(imputed_dir):
                     dr2v = float(dr2)
                 except ValueError:
                     dr2v = None
-            table[(c, int(p))] = (ref, alt, dr2v, imp.strip() == "1", multiallelic)
+            key = (c, int(p))
+            if key in table:
+                # Two records at one position (a multiallelic site the panel carries as split
+                # biallelic records, e.g. G>A and G>T). plink2 drops both under --rm-dup
+                # exclude-all, so passing either one on would make score_plink2 use fewer
+                # variants than it was handed -- an internal-consistency STOP. It is the same
+                # situation as a multiallelic record, and is treated the same way.
+                ref0 = table[key][0]
+                table[key] = (ref0, alt, None, imp.strip() == "1", True)
+                continue
+            table[key] = (ref, alt, dr2v, imp.strip() == "1", multiallelic)
+        err = proc.stderr.read()
+        if proc.wait() != 0:
+            raise SystemExit(f"match_variants.py: bcftools query failed on {f}\n{err[-2000:]}")
     return table, files
 
 
 def load_typed(vcf):
-    proc = subprocess.run(["bcftools", "query", "-f", "%CHROM\t%POS\n", vcf],
+    """Positions where the person's own file carries a CALLED genotype. An array no-call is kept
+    in the normalized VCF as a missing genotype; its presence is not a measurement, so it must
+    not earn the typed route's r2 = 1.0. Beagle fills such a site like any other, and it is
+    judged on its DR2 like any other imputed value."""
+    proc = subprocess.run(["bcftools", "query", "-i", 'GT!="mis"', "-f", "%CHROM\t%POS\n", vcf],
                           capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise SystemExit(f"match_variants.py: bcftools query failed on {vcf}\n{proc.stderr[-2000:]}")
     return {(c, int(p)) for c, p in (l.split("\t") for l in proc.stdout.splitlines())}
 
 
@@ -102,7 +155,9 @@ def main():
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
-    imputed, imputed_files = load_imputed(args.imputed_dir)
+    wanted = model_positions(args.scorefile, args.chr_col, args.pos_col)
+    imputed, imputed_files = load_imputed(args.imputed_dir, wanted,
+                                          os.path.join(args.out_dir, "model_positions.tsv"))
     typed = load_typed(args.typed_vcf)
 
     counts = collections.Counter()

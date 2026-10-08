@@ -157,6 +157,17 @@ def cmd_build_ref(args):
         "deviation_note": _deviation_note(labels),
     }
     lib_run.write_json(os.path.join(out, "reference_build.json"), meta)
+    if not args.keep_intermediates:
+        # ref_raw and ref_nonpal exist only to produce ref_pruned and nonpalindromic.ids;
+        # nothing after build-ref reads them (project and the reference provider use
+        # ref_pruned and ref_pca.*). Their .pgen/.pvar are ~8.6 GB for the HGDP+1kGP basis,
+        # in every run that builds its own, which filled this box mid-run. The .psam and .log
+        # files stay, so what was built is still on record.
+        for stem in ("ref_raw", "ref_nonpal"):
+            for ext in (".pgen", ".pvar"):
+                path = os.path.join(out, stem + ext)
+                if os.path.exists(path):
+                    os.remove(path)
     return meta
 
 
@@ -524,6 +535,9 @@ def main():
     b.add_argument("--pcs", type=int, required=True)
     b.add_argument("--exclude-palindromic", required=True, choices=["yes", "no"])
     b.add_argument("--out-dir", required=True)
+    b.add_argument("--keep-intermediates", action="store_true",
+                   help="keep ref_raw/ref_nonpal .pgen/.pvar (~8.6 GB for HGDP+1kGP); by default "
+                        "they are removed once ref_pruned is built, since nothing reads them")
 
     p = sub.add_parser("project")
     p.add_argument("--run")

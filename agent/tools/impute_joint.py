@@ -32,16 +32,35 @@ import argparse
 import gzip
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lib_run  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-JAVA = os.path.join(ROOT, "refdata", "jre", "bin", "java")
 BEAGLE = os.path.join(ROOT, "refdata", "bin", "beagle.jar")
+
+
+def find_java():
+    """The bundled refdata/jre is a macOS aarch64 build (its `release` file says
+    OS_NAME="Darwin", OS_ARCH="aarch64") and ships mode 644, so on Linux it cannot run at
+    all. Use it only if it actually starts; otherwise the java on PATH."""
+    bundled = os.path.join(ROOT, "refdata", "jre", "bin", "java")
+    if os.access(bundled, os.X_OK):
+        try:
+            if subprocess.run([bundled, "-version"], capture_output=True).returncode == 0:
+                return bundled
+        except OSError:
+            pass
+    found = shutil.which("java")
+    if not found:
+        die("no runnable java: the bundled refdata/jre does not start here and none is on PATH")
+    return found
 
 
 def parse_chroms(spec):
@@ -96,8 +115,59 @@ class Failed(Exception):
         self.stderr = stderr or ""
 
 
+# Wall-clock per step for the chromosome in progress, so Beagle and the bcftools steps
+# around it can be told apart in impute_joint.json rather than guessed at. Per thread, because
+# with --parallel-chromosomes several chromosomes are in progress at once.
+_TLS = threading.local()
+
+
+def timed(step, t0):
+    steps = _TLS.__dict__.setdefault("steps", {})
+    steps[step] = round(steps.get(step, 0) + time.time() - t0, 2)
+
+
+# Hold-outs enter the Beagle target under this prefix so that excludesamples=, which Beagle
+# applies to target and reference alike, removes them from the reference only.
+HOLDOUT_PREFIX = "DR2HOLDOUT_"
+
+
+def beagle_sample_counts(log_text):
+    """'Reference samples: 2,203' / 'Study samples: 302' off Beagle's stdout."""
+    n_ref = n_study = None
+    for line in log_text.splitlines():
+        parts = line.split(":")
+        if len(parts) != 2:
+            continue
+        key, val = " ".join(parts[0].split()), parts[1].strip().replace(",", "")
+        if key == "Reference samples" and val.isdigit():
+            n_ref = int(val)
+        elif key == "Study samples" and val.isdigit():
+            n_study = int(val)
+    return n_ref, n_study
+
+
+def check_panel_split(panel_dir, chroms, holdout, reference, patient_id):
+    """The prebuilt panel minus the hold-out must be exactly the reference list, on every
+    chromosome: that is the same disjointness the per-run rebuild guaranteed by construction."""
+    hold, ref = set(holdout), set(reference)
+    for c in chroms:
+        path = os.path.join(panel_dir, f"chr{c}.snv.vcf.gz")
+        if not (os.path.exists(path) and os.path.exists(path + ".tbi")):
+            continue  # reported per chromosome as SKIPPED_no_panel
+        panel = set(vcf_samples(path))
+        if not hold <= panel:
+            die(f"chr{c}: {len(hold - panel)} hold-out sample(s) are not in {path}")
+        if panel - hold != ref:
+            die(f"chr{c}: {path} minus the hold-out is not the reference list "
+                f"({len(panel - hold)} vs {len(ref)} samples)")
+        if patient_id in panel or any(s.startswith(HOLDOUT_PREFIX) for s in panel):
+            die(f"chr{c}: {path} contains the patient id or a {HOLDOUT_PREFIX} name")
+
+
 def run_step(step, cmd):
+    t0 = time.time()
     proc = subprocess.run(cmd, capture_output=True, text=True)
+    timed(step, t0)
     if proc.returncode != 0:
         raise Failed(step, proc.returncode, proc.stderr)
     return proc
@@ -105,6 +175,7 @@ def run_step(step, cmd):
 
 def run_pipe(step, cmd_a, cmd_b):
     """cmd_a | cmd_b, both stderr captured. Either non-zero fails the step."""
+    t0 = time.time()
     p_a = subprocess.Popen(cmd_a, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     p_b = subprocess.Popen(cmd_b, stdin=p_a.stdout, stdout=subprocess.DEVNULL,
                            stderr=subprocess.PIPE)
@@ -112,18 +183,49 @@ def run_pipe(step, cmd_a, cmd_b):
     err_b = p_b.communicate()[1]
     err_a = p_a.communicate()[1]
     rc = p_a.returncode or p_b.returncode
+    timed(step, t0)
     if rc != 0:
         text = (err_a or b"").decode(errors="replace") + (err_b or b"").decode(errors="replace")
         raise Failed(step, rc, text)
 
 
+def run_chain(step, cmds, stdout_path=None):
+    """cmds[0] | cmds[1] | ... ; every stage's stderr captured, any non-zero fails the step."""
+    t0 = time.time()
+    procs, prev = [], None
+    out_fh = open(stdout_path, "wb") if stdout_path else subprocess.DEVNULL
+    try:
+        for i, cmd in enumerate(cmds):
+            last = i == len(cmds) - 1
+            p = subprocess.Popen(cmd, stdin=prev, stdout=out_fh if last else subprocess.PIPE,
+                                 stderr=subprocess.PIPE)
+            if prev is not None:
+                prev.close()  # so an upstream stage sees SIGPIPE if this one dies
+            prev = p.stdout
+            procs.append(p)
+        errs = [p.communicate()[1] for p in reversed(procs)][::-1]
+    finally:
+        if stdout_path:
+            out_fh.close()
+    timed(step, t0)
+    codes = [p.returncode for p in procs]
+    if any(codes):
+        # When a downstream stage dies, every stage upstream of it is killed by SIGPIPE; the
+        # code worth recording is the first one that is not that.
+        real = [rc for rc in codes if rc not in (0, -signal.SIGPIPE)]
+        raise Failed(step, real[0] if real else next(rc for rc in codes if rc),
+                     "".join((e or b"").decode(errors="replace") for e in errs))
+
+
 def query_gzip(step, cmd, out_path):
     """Stream a bcftools query straight into a gzipped file."""
+    t0 = time.time()
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     with gzip.open(out_path, "wb") as gz:
         for chunk in iter(lambda: proc.stdout.read(1 << 20), b""):
             gz.write(chunk)
     err = proc.communicate()[1]
+    timed(step, t0)
     if proc.returncode != 0:
         raise Failed(step, proc.returncode, (err or b"").decode(errors="replace"))
 
@@ -136,17 +238,32 @@ def main():
     ap.add_argument("--holdout-samples", required=True, help="from build_dr2_cohort.py")
     ap.add_argument("--reference-samples", required=True, help="from build_dr2_cohort.py")
     ap.add_argument("--phase3-dir", required=True, help="per-chromosome 1000G VCFs, chr<N>.vcf.gz")
+    ap.add_argument("--panel-dir", default=None,
+                    help="prebuilt reference: chr<N>.snv.vcf.gz, the phase3 panel filtered once to "
+                         "biallelic SNVs with exact duplicates collapsed, ALL samples. Given, the "
+                         "hold-out is excluded at Beagle read time (excludesamples=) instead of "
+                         "rebuilding a reference VCF per chromosome per run")
     ap.add_argument("--map-dir", required=True)
     ap.add_argument("--typed-positions", required=True, help="chrom<TAB>pos, no header")
     ap.add_argument("--chromosomes", required=True)
     ap.add_argument("--seed", required=True, help="fixed and recorded -- SCO-10")
     ap.add_argument("--threads", default="4")
     ap.add_argument("--xmx", default="8g")
+    ap.add_argument("--java-opt", action="append", default=[],
+                    help="extra JVM option for Beagle, repeatable (e.g. -XX:+UseParallelGC). JVM "
+                         "settings change speed, not results; Beagle's own parameters are not "
+                         "exposed here")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--work-dir", default=None, help="default <out-dir>/work")
     ap.add_argument("--keep-work", action="store_true", help="keep per-chromosome intermediates")
     ap.add_argument("--skip-existing", action="store_true")
+    ap.add_argument("--parallel-chromosomes", type=int, default=1,
+                    help="chromosomes in flight at once, each its own Beagle with --threads and "
+                         "--xmx; largest first. Beagle's output depends on its nthreads, so keep "
+                         "--threads fixed and change this instead")
     args = ap.parse_args()
+    if args.parallel_chromosomes < 1:
+        die("--parallel-chromosomes must be at least 1")
 
     work_root = args.work_dir or os.path.join(args.out_dir, "work")
 
@@ -173,6 +290,10 @@ def main():
         die(f"--patient-id {args.patient_id!r} appears in a sample list; the patient must be in "
             f"neither the reference nor the hold-out set")
 
+    if args.panel_dir:
+        check_panel_split(args.panel_dir, parse_chroms(args.chromosomes), holdout, reference,
+                          args.patient_id)
+
     os.makedirs(args.out_dir, exist_ok=True)
     os.makedirs(work_root, exist_ok=True)
     # The 302-sample Beagle output lives in its own subdirectory. match_variants.py globs
@@ -182,12 +303,24 @@ def main():
     cohort_dir = os.path.join(args.out_dir, "cohort")
     os.makedirs(cohort_dir, exist_ok=True)
 
-    beagle_probe = subprocess.run([JAVA, "-jar", BEAGLE], capture_output=True, text=True)
+    # Fail before hours of compute rather than during them: a run that filled the disk mid-way
+    # lost its whole score stage. The outputs come to roughly half the reference's size (the
+    # 302-sample cohort VCF is most of it); ask for 0.6x of it free.
+    ref_paths = [os.path.join(args.panel_dir, f"chr{c}.snv.vcf.gz") if args.panel_dir
+                 else os.path.join(args.phase3_dir, f"chr{c}.vcf.gz")
+                 for c in parse_chroms(args.chromosomes)]
+    need = int(0.6 * sum(os.path.getsize(p) for p in ref_paths if os.path.exists(p)))
+    free = shutil.disk_usage(args.out_dir).free
+    if free < need:
+        die(f"{free / 1e9:.1f} GB free under {args.out_dir}; these chromosomes need about "
+            f"{need / 1e9:.1f} GB for their outputs. Free space first.")
+
+    java = find_java()
+    beagle_probe = subprocess.run([java, "-jar", BEAGLE], capture_output=True, text=True)
     version_text = (beagle_probe.stdout + beagle_probe.stderr).strip()
     version_line = version_text.splitlines()[0] if version_text else None
 
-    runs = []
-    for c in parse_chroms(args.chromosomes):
+    def one(c):
         src = os.path.join(args.phase3_dir, f"chr{c}.vcf.gz")
         gmap = os.path.join(args.map_dir, f"plink.chr{c}.GRCh37.map")
         patient_out = os.path.join(args.out_dir, f"chr{c}.vcf.gz")
@@ -196,19 +329,26 @@ def main():
         work = os.path.join(work_root, f"chr{c}")
 
         if not (os.path.exists(src) and os.path.exists(src + ".tbi")):
-            runs.append({"chrom": c, "status": "SKIPPED_no_source", "source": src})
             print(f"chr{c}: SKIPPED_no_source", file=sys.stderr)
-            continue
+            return {"chrom": c, "status": "SKIPPED_no_source", "source": src}
+        panel = os.path.join(args.panel_dir, f"chr{c}.snv.vcf.gz") if args.panel_dir else None
+        if panel and not (os.path.exists(panel) and os.path.exists(panel + ".tbi")):
+            print(f"chr{c}: SKIPPED_no_panel", file=sys.stderr)
+            return {"chrom": c, "status": "SKIPPED_no_panel", "source": src}
         if not os.path.exists(gmap):
-            runs.append({"chrom": c, "status": "SKIPPED_no_genetic_map", "source": src, "map": gmap})
             print(f"chr{c}: SKIPPED_no_genetic_map", file=sys.stderr)
-            continue
+            return {"chrom": c, "status": "SKIPPED_no_genetic_map", "source": src, "map": gmap}
         if args.skip_existing and os.path.exists(patient_out):
-            runs.append({"chrom": c, "status": "SKIPPED_output_exists", "source": src,
-                         "map": gmap, "patient_output": patient_out})
             print(f"chr{c}: SKIPPED_output_exists", file=sys.stderr)
-            continue
+            return {"chrom": c, "status": "SKIPPED_output_exists", "source": src,
+                    "map": gmap, "patient_output": patient_out}
 
+        # Final names are only ever written by os.replace after every step has succeeded, so a
+        # chr<N>.vcf.gz in --out-dir is always complete: downstream tools glob that directory,
+        # and --skip-existing trusts it. A failure part-way (ENOSPC took a run down this way)
+        # leaves nothing behind under a final name.
+        patient_tmp = os.path.join(work, f"chr{c}.patient.vcf.gz")
+        dr2_tmp = os.path.join(work, f"chr{c}.dr2.tsv.gz")
         entry = {"chrom": c, "source": src, "map": gmap,
                  "patient_output": patient_out, "cohort_output": cohort_stem + ".vcf.gz",
                  "dr2_table": dr2_out, "beagle_log": os.path.join(args.out_dir, f"chr{c}.beagle.log")}
@@ -217,25 +357,50 @@ def main():
         hold_vcf = os.path.join(work, "hold.vcf.gz")
         merged_vcf = os.path.join(work, "merged.vcf.gz")
         t0 = time.time()
+        _TLS.steps = {}
         markers = None
+        cohort_index = None
         try:
-            # reference = everyone not held out, biallelic SNVs, duplicates collapsed.
-            # -Oz1 (fast compression): Beagle reads it fine and it writes far faster than level 6.
-            run_pipe("bcftools view (reference)",
-                     ["bcftools", "view", "-S", args.reference_samples, "--force-samples",
-                      "-m2", "-M2", "-v", "snps", src, "-Ou"],
-                     ["bcftools", "norm", "-d", "exact", "-Oz1", "--threads", args.threads,
-                      "-o", ref_vcf])
-            run_step("bcftools index (reference)", ["bcftools", "index", "-f", "-t", ref_vcf])
+            if args.panel_dir:
+                # reference = the prebuilt all-sample panel; the hold-out is dropped from it at
+                # read time by excludesamples=. Beagle applies excludesamples= to the target
+                # too, so the hold-outs go into the target under HOLDOUT_PREFIX names and are
+                # not excluded from it. Measured byte-identical to the per-run rebuild below.
+                ref_vcf = os.path.join(args.panel_dir, f"chr{c}.snv.vcf.gz")
+            else:
+                # reference = everyone not held out, biallelic SNVs, duplicates collapsed.
+                # -Oz1 (fast compression): Beagle reads it fine and it writes far faster than level 6.
+                run_pipe("bcftools view (reference)",
+                         ["bcftools", "view", "-S", args.reference_samples, "--force-samples",
+                          "-m2", "-M2", "-v", "snps", src, "-Ou"],
+                         ["bcftools", "norm", "-d", "exact", "-Oz1", "--threads", args.threads,
+                          "-o", ref_vcf])
+                run_step("bcftools index (reference)", ["bcftools", "index", "-f", "-t", ref_vcf])
 
             # hold-out = the DR2 cohort, masked to the patient's typed positions so it carries an
             # array's worth of sites, not full WGS. Unmasked hold-outs would not resemble the
             # patient and the DR2 measured over them would not describe the patient's imputation.
+            # -R (index jumps), not -T (stream the whole 2,504-sample file): the same records,
+            # byte for byte (checked on chr22), without parsing the chromosome end to end.
+            # --regions-overlap pos gives -R exactly -T's rule (a record is kept only if its POS
+            # is a typed position), not -R's default of any overlap.
             run_step("bcftools view (hold-out)",
                      ["bcftools", "view", "-S", args.holdout_samples, "--force-samples",
-                      "-m2", "-M2", "-v", "snps", "-T", args.typed_positions, src,
+                      "-m2", "-M2", "-v", "snps", "-R", args.typed_positions,
+                      "--regions-overlap", "pos", src,
                       "-Oz1", "--threads", args.threads, "-o", hold_vcf])
             run_step("bcftools index (hold-out)", ["bcftools", "index", "-f", "-t", hold_vcf])
+            if args.panel_dir:
+                renamed = os.path.join(work, "hold.renamed.vcf.gz")
+                rename_map = os.path.join(work, "holdout_rename.txt")
+                with open(rename_map, "w") as fh:
+                    for sample in holdout:
+                        fh.write(f"{sample}\t{HOLDOUT_PREFIX}{sample}\n")
+                run_step("bcftools reheader (hold-out)",
+                         ["bcftools", "reheader", "-s", rename_map, "-o", renamed, hold_vcf])
+                run_step("bcftools index (hold-out renamed)",
+                         ["bcftools", "index", "-f", "-t", renamed])
+                hold_vcf = renamed
 
             # patient + hold-outs as ONE Beagle target: this is what makes DR2 a measurement.
             run_step("bcftools merge",
@@ -246,44 +411,114 @@ def main():
 
             # Beagle, run exactly as tools/impute.py runs it. chrom= confines the run to this
             # chromosome even though the patient VCF spans the genome.
-            cmd = [JAVA, f"-Xmx{args.xmx}", "-jar", BEAGLE,
+            cmd = [java, f"-Xmx{args.xmx}", *args.java_opt, "-jar", BEAGLE,
                    f"gt={merged_vcf}", f"ref={ref_vcf}", f"map={gmap}",
                    f"out={cohort_stem}", f"chrom={c}", f"nthreads={args.threads}",
                    f"seed={args.seed}", "gp=true", "impute=true"]
+            if args.panel_dir:
+                cmd.append(f"excludesamples={args.holdout_samples}")
             entry["beagle_command"] = " ".join(cmd)
+            t_beagle = time.time()
             proc = subprocess.run(cmd, capture_output=True, text=True)
+            timed("beagle", t_beagle)
             with open(entry["beagle_log"], "w") as fh:
                 fh.write(" ".join(cmd) + "\n\n" + proc.stdout + "\n" + proc.stderr)
             if proc.returncode != 0:
                 raise Failed("beagle", proc.returncode, proc.stderr)
-            run_step("bcftools index (cohort)",
-                     ["bcftools", "index", "-f", "-t", cohort_stem + ".vcf.gz"])
+            # Read the split back off Beagle's own log rather than trusting the arguments: the
+            # reference it used must be exactly the reference list, the target exactly
+            # patient + hold-outs.
+            n_ref, n_study = beagle_sample_counts(proc.stdout)
+            entry["beagle_reference_samples"] = n_ref
+            entry["beagle_study_samples"] = n_study
+            if n_ref != len(reference) or n_study != 1 + len(holdout):
+                raise Failed("beagle sample counts", 0,
+                             f"Beagle reports {n_ref} reference and {n_study} study samples; "
+                             f"expected {len(reference)} and {1 + len(holdout)}")
+            # Nothing below reads the cohort index; it is for whoever opens the cohort file
+            # later. So it runs alongside the patient extraction rather than ahead of it.
+            t_cohort_index = time.time()
+            cohort_index = subprocess.Popen(
+                ["bcftools", "index", "-f", "-t", cohort_stem + ".vcf.gz"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
             # The patient-only file takes the plain chr<N>.vcf.gz name: downstream tools read this
             # directory expecting one sample per file.
-            run_step("bcftools view (patient)",
-                     ["bcftools", "view", "-s", args.patient_id, cohort_stem + ".vcf.gz",
-                      "-Oz", "--threads", args.threads, "-o", patient_out])
-            run_step("bcftools index (patient)", ["bcftools", "index", "-f", "-t", patient_out])
+            # The patient is the first sample of the target (bcftools merge was given --target
+            # first, and Beagle keeps target order), so its genotypes are column 10. Cutting
+            # that column out of the text stream before bcftools sees it spares bcftools from
+            # parsing 301 hold-out columns only to discard them: 58 s -> 13 s on chr22. The
+            # same `bcftools view -s <patient>` still runs on the one-sample stream, so the
+            # name is still checked (it fails if column 10 is anyone else) and INFO/AC,AN are
+            # added exactly as before -- the body is byte-identical. Beagle's output declares
+            # no ##contig, which bcftools needs to subset a stream, hence the sed.
+            run_chain("bcftools view (patient)",
+                      [["bgzip", "-dc", cohort_stem + ".vcf.gz"],
+                       ["cut", "-f1-10"],
+                       ["sed", f"/^#CHROM/i\\\n##contig=<ID={c}>"],
+                       ["bcftools", "view", "-s", args.patient_id, "-Oz", "-o", patient_tmp]])
+            run_step("bcftools index (patient)", ["bcftools", "index", "-f", "-t", patient_tmp])
 
-            # DR2/IMP off the cohort output -- estimated across the whole Beagle target.
+            # DR2/IMP -- estimated across the whole Beagle target. INFO is site-level, so the
+            # patient file carries the cohort's DR2 and IMP unchanged (bcftools view -s only
+            # adds AC/AN); reading them off the one-sample file gives the identical table
+            # without parsing 302 sample columns again (10 s -> 1.5 s on chr22).
             query_gzip("bcftools query (dr2)",
                        ["bcftools", "query", "-f",
                         "%CHROM\t%POS\t%REF\t%ALT\t%INFO/DR2\t%INFO/IMP\n",
-                        cohort_stem + ".vcf.gz"],
-                       dr2_out)
+                        patient_tmp],
+                       dr2_tmp)
+
+            err = cohort_index.communicate()[1]
+            timed("bcftools index (cohort, concurrent)", t_cohort_index)
+            if cohort_index.returncode != 0:
+                raise Failed("bcftools index (cohort)", cohort_index.returncode,
+                             (err or b"").decode(errors="replace"))
 
             markers = n_markers(cohort_stem + ".vcf.gz")
+            os.replace(dr2_tmp, dr2_out)
+            os.replace(patient_tmp + ".tbi", patient_out + ".tbi")
+            os.replace(patient_tmp, patient_out)
             entry.update({"status": "ok", "returncode": 0, "n_markers": markers})
-        except Failed as exc:
-            entry.update({"status": "FAILED", "failed_step": exc.step,
-                          "returncode": exc.returncode, "stderr_tail": exc.stderr[-2000:]})
+        except (Failed, OSError) as exc:
+            if isinstance(exc, Failed):
+                entry.update({"status": "FAILED", "failed_step": exc.step,
+                              "returncode": exc.returncode, "stderr_tail": exc.stderr[-2000:]})
+            else:
+                entry.update({"status": "FAILED", "failed_step": "filesystem",
+                              "returncode": None, "stderr_tail": str(exc)})
+        finally:
+            if cohort_index is not None and cohort_index.poll() is None:
+                cohort_index.wait()
+        if entry.get("status") != "ok":
+            # The cohort output of a failed chromosome may be cut short; it is not evidence of
+            # anything, and leaving it would look like a finished run's output.
+            for path in (cohort_stem + ".vcf.gz", cohort_stem + ".vcf.gz.tbi"):
+                if os.path.exists(path):
+                    os.remove(path)
         entry["seconds"] = round(time.time() - t0, 1)
+        entry["step_seconds"] = dict(_TLS.steps)
         if not args.keep_work:
             shutil.rmtree(work, ignore_errors=True)
-        runs.append(entry)
         print(f"chr{c}: {entry['status']} ({entry['seconds']}s, "
               f"{markers if markers is not None else 'n/a'} markers)", file=sys.stderr)
+        return entry
+
+    chroms = parse_chroms(args.chromosomes)
+    t_all = time.time()
+    if args.parallel_chromosomes == 1:
+        runs = [one(c) for c in chroms]
+    else:
+        # Largest first, so the last chromosomes to start are the short ones and the pool does
+        # not end on one long straggler. Each worker runs one whole chromosome at a time.
+        def size(c):
+            path = os.path.join(args.phase3_dir, f"chr{c}.vcf.gz")
+            return os.path.getsize(path) if os.path.exists(path) else 0
+        order = sorted(chroms, key=size, reverse=True)
+        with ThreadPoolExecutor(max_workers=args.parallel_chromosomes) as pool:
+            done = dict(zip(order, pool.map(one, order)))
+        runs = [done[c] for c in chroms]
+    wall_seconds = round(time.time() - t_all, 1)
 
     result = {
         "tool": "impute_joint.py",
@@ -295,7 +530,8 @@ def main():
         "dr2_provenance": "DR2/IMP come from the same Beagle output as the patient dosages; "
                           "nothing is transplanted from a separate run",
         "beagle_version": version_line,
-        "java": lib_run.tool_version([JAVA, "-version"]),
+        "java": lib_run.tool_version([java, "-version"]),
+        "java_path": java,
         "bcftools": lib_run.tool_version(["bcftools", "--version"]),
         "patient_id": args.patient_id,
         "target": args.target,
@@ -305,6 +541,10 @@ def main():
         "n_reference_samples": len(reference),
         "typed_positions": args.typed_positions,
         "phase3_dir": args.phase3_dir,
+        "panel_dir": args.panel_dir,
+        "reference_route": ("prebuilt all-sample panel, hold-out excluded at read time "
+                            "(excludesamples=), hold-outs renamed " + HOLDOUT_PREFIX + "* in the target")
+                           if args.panel_dir else "per-run rebuild from phase3 (bcftools view -S)",
         "map_dir": args.map_dir,
         "chromosomes": args.chromosomes,
         "seed": args.seed,
@@ -314,7 +554,10 @@ def main():
             "sample_lists_disjoint": True,
             "patient_in_neither_list": True,
         },
+        "wall_seconds_all_chromosomes": wall_seconds,
         "parameters": {"threads": args.threads, "xmx": args.xmx, "gp": True, "impute": True,
+                       "parallel_chromosomes": args.parallel_chromosomes,
+                       "java_opts": args.java_opt,
                        "keep_work": args.keep_work, "work_dir": work_root},
         "per_chromosome": runs,
         "n_ok": sum(1 for r in runs if r.get("status") == "ok"),

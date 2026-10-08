@@ -16,6 +16,7 @@ Everything below was arrived at empirically. The three that cost the most time:
   reintroduce a directory shared across runs, so the noise is accepted and filtered.
 """
 import os
+import signal
 import subprocess
 import time
 
@@ -87,6 +88,9 @@ class SandboxedClaude:
         self.append_system_prompt = append_system_prompt
         self.setting_sources = setting_sources
         self.invocations = []
+        self._proc = None
+        self._new_session = False
+        self._stop_requested = False
 
     def _argv(self, prompt, session_id=None, resume=None, output_format="text"):
         argv = ["/usr/bin/sandbox-exec", "-f", self.profile_path, "claude",
@@ -115,14 +119,58 @@ class SandboxedClaude:
         argv += ["--permission-mode", "bypassPermissions"]
         return argv
 
+    def _signal(self, proc):
+        try:
+            if self._new_session:
+                os.killpg(proc.pid, signal.SIGKILL)
+            else:
+                proc.kill()
+        except OSError:
+            pass
+
+    def kill(self):
+        """Stop the running invocation from another thread. True if one was running.
+
+        A run started after this is stopped as it starts. With new_session the whole
+        process group goes, so the tools the agent launched do not outlive it.
+        """
+        self._stop_requested = True
+        proc = self._proc
+        if proc is None or proc.poll() is not None:
+            return False
+        self._signal(proc)
+        return True
+
     def run(self, prompt, timeout, session_id=None, resume=None, output_format="text",
-            log_path=None):
+            log_path=None, new_session=False):
+        """subprocess.run's behaviour, with the process held where kill() can reach it.
+
+        new_session puts the agent in its own process group, so a timeout or kill() takes
+        its tools with it.
+        """
         argv = self._argv(prompt, session_id=session_id, resume=resume,
                           output_format=output_format)
         t0 = time.time()
-        proc = subprocess.run(argv, cwd=self.sandbox_root, env=self.env,
-                              capture_output=True, text=True, timeout=timeout,
-                              stdin=subprocess.DEVNULL)
+        self._new_session = new_session
+        with subprocess.Popen(argv, cwd=self.sandbox_root, env=self.env,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                              stdin=subprocess.DEVNULL,
+                              start_new_session=new_session) as popen:
+            self._proc = popen
+            if self._stop_requested:
+                self._signal(popen)
+            try:
+                stdout, stderr_raw = popen.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                self._signal(popen)
+                popen.wait()
+                raise
+            except BaseException:
+                self._signal(popen)
+                raise
+            finally:
+                self._proc = None
+            proc = subprocess.CompletedProcess(argv, popen.poll(), stdout, stderr_raw)
         elapsed = time.time() - t0
 
         stderr = _drop_xcrun_noise(proc.stderr or "")

@@ -111,14 +111,23 @@ current build, which is no longer the working box's (§8, "What is not reproduce
 
 ```bash
 apt install -y nodejs npm
-npm install -g @anthropic-ai/claude-code@2.1.224
-claude --version    # must print 2.1.224
+npm install -g @anthropic-ai/claude-code@2.1.293
+claude --version    # must print 2.1.293
 which -a claude     # must be ONE entry, and it must be the npm one
 ```
 
-**Pin the version and pin it after any sign-in.** Newer versions cannot open their
-scratch directory inside the sandbox, so every case dies in under a second with what
-reads like a permissions error. This is the single most expensive thing to get wrong.
+**Pin the version and pin it after any sign-in.** The September 2026 corpus (tag
+`eval-corpus-2026-09`) ran on 2.1.224 with `claude-opus-4-8`; some versions after that could
+not open their scratch directory inside the sandbox, so every case died in under a second
+with what read like a permissions error. The agent now runs on `claude-opus-5-5`, which needs
+2.1.280 or newer; 2.1.293 was checked inside the sandbox on 2026-10-08 (a door-only run and
+full runs). A run on it is a new experiment, not a reproduction of the corpus. This is still
+the single most expensive thing to get wrong.
+
+**The same symptom has a second cause.** A half-finished `npm install -g` of the CLI can
+leave `bin/claude.exe` as a 500-byte stub ("claude native binary not installed"); every case
+then dies with `execvp claude: Permission denied`. It happened on 2026-10-08. `claude
+--version` failing on the host is the tell, and `run_harness.py` now checks it before launch.
 
 **The pin is only as good as your `PATH`.** npm installs to `/usr/bin/claude`, and
 `/usr/local/bin` comes before `/usr/bin` on Ubuntu — so a second `claude` there silently
@@ -221,7 +230,7 @@ clone turns out to need them:
 **UNVERIFIED whether a fresh clone needs them.** If the gate run in section 10 fails at
 staging, look here first. Read each before running it.
 
-## 8. Reference data, about 49 GB
+## 8. Reference data, about 65 GB
 
 > **As of 2026-09-24 `agent/refdata` can be rebuilt from public sources, with the
 > exceptions listed under "What is not reproduced".** Two scripts do it:
@@ -265,9 +274,12 @@ python3 fetch_refdata.py --verify        # reads every byte; expect 0 problems
 
 # 3. Build what is derived: bin/plink2, hgdp_1kgp/, jre/ and maps/ out of their
 #    archives, fasta/ and its indexes, hgdp_1kgp.panel, the phase3 .done markers, the
-#    PCA basis hgdp_basis/, and panel/sites_index (which needs panel_index.py from the
-#    private repo, restored in section 6). About 26 GB free beyond the downloads and
-#    30-40 min. It never overwrites anything.
+#    PCA basis hgdp_basis/, panel/sites_index (which needs panel_index.py from the
+#    private repo, restored in section 6), and panel-snv/, the phase3 panel filtered to
+#    biallelic SNVs over all 2,504 samples that the score stage imputes against (16 GB,
+#    about 6 h of CPU, built one chromosome at a time; reproduced bit for bit only by
+#    bcftools/htslib 1.19, i.e. Ubuntu 24.04, and that was checked on chr22 only). About
+#    42 GB free beyond the downloads, and several hours. It never overwrites anything.
 python3 build_refdata.py --plan
 python3 build_refdata.py
 
@@ -275,7 +287,7 @@ python3 build_refdata.py
 python3 build_refdata.py --check
 ```
 
-The whole rebuild peaks at about 62 GB (36 GB of downloads, 26 GB derived). After step 4
+The whole rebuild peaks at about 78 GB (36 GB of downloads, 42 GB derived). After step 4
 you can delete `agent/refdata-downloads/` (17 GB). `fetch_refdata.py` counts an archive
 whose files are all in place as present, so it will not fetch the archives again.
 
@@ -428,7 +440,7 @@ backup.
 
 ```bash
 cd harness && ./run_harness.py gate --persona p40      # stages everything, launches nothing
-cd harness && ./run_harness.py run  --persona p40 --model claude-opus-4-8
+cd harness && ./run_harness.py run  --persona p40 --model claude-opus-5-5
 ```
 
 The gate is free and catches a staging or scrub failure. The run costs tokens and is the

@@ -79,6 +79,10 @@ def main():
     os.makedirs(work, exist_ok=True)
 
     n_input = sum(1 for _ in open(args.score_input)) - 1
+    # Hashed here, before plink reads it, so the record says which bytes this raw score came
+    # from. The reference cohort is scored from "the same file" later, and a later hash of
+    # the path proves nothing about what was scored now.
+    score_input_sha256 = lib_run.sha256_file(args.score_input)
     files = sorted(glob.glob(os.path.join(args.imputed_dir, "*.vcf.gz")))
     if not files:
         raise SystemExit(f"score_plink2.py: no imputed VCFs in {args.imputed_dir}")
@@ -127,6 +131,7 @@ def main():
         "import_max_alleles": 2,
         "guard": "no-mean-imputation set; see the module docstring for why that is only half the rule",
         "score_input": args.score_input,
+        "score_input_sha256": score_input_sha256,
         # Provenance, not computation: the artifact recorded WHICH VARIANT SET produced the score
         # but not WHICH DOSAGE SOURCE, so the imputed directory had to be supplied from outside to
         # check it. An artifact that does not name its own inputs cannot be checked against them.
@@ -143,8 +148,8 @@ def main():
         "per_chromosome": per_chrom,
         "raw_score": total_sum,
         "raw_score_meaning": "sum(dosage x beta) over the resolved set. It is NOT a risk and NOT a "
-                             "percentile; placing it is interpret's job (INT-1..INT-3), and it "
-                             "cannot happen until the reference distribution exists.",
+                             "percentile; placing it is interpret's job (INT-1..INT-3), against a "
+                             "reference built for this model and this resolved set.",
     }
     out = os.path.join(args.out_dir, "raw_score.json")
     lib_run.emit(result, out)

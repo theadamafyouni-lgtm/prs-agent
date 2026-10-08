@@ -199,12 +199,26 @@ the agent its candidate list — which is select's whole job. Every connection i
 
 File-based, and the messages are the record.
 
-The agent calls one tool, which blocks:
+The agent calls one tool. `ask-person` blocks; a reference request can take hours, so it is
+sent with `--no-wait` and collected with `await-reference`, which waits up to `--timeout` and
+exits 6 while the provider is still running:
 
 ```
 python3 comms/harness_client.py ask-person --stage <s> --question "..." --why "..."
-python3 comms/harness_client.py request-reference --request runs/<RUN>/interpret/request.json
+python3 comms/harness_client.py request-reference --no-wait --request runs/<RUN>/interpret/request.json
+python3 comms/harness_client.py await-reference --id <the id it printed> --timeout 540
 ```
+
+The provider runs in its own thread in the orchestrator, one request at a time, so questions to
+the person are still routed while a reference is being built. A second request while one is
+being built is answered `busy` with the id of the one in flight. Each request starts from an
+emptied provider `inputs/`, `work/` and artifact, and a provider still running when the PRS agent
+exits is stopped, not left behind.
+
+Every path in a reference request must resolve inside the run's own `runs/<RUN>/`, which must
+itself be a real directory; files are read from a descriptor checked to be a regular file still
+inside it, and the artifact and every reply are written into the sandbox one directory at a time
+without following a link, by rename. A refusal does not say where a path resolved to.
 
 It computes nothing and decides nothing. The orchestrator picks the message up, appends it to
 the canonical transcript, and routes it — to the person via the live-run contract, or to a

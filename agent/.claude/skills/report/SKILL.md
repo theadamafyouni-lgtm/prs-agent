@@ -1,6 +1,6 @@
 ---
 name: report
-description: Stage 4. One structured output — the score, where the person stands, the honest limits personalized to them, and a disclaimer — delivered with care. Handles the follow-up state and the explain-my-result vs tell-me-what-to-do-medically boundary (REP-1..REP-14). Blocked until INT-1 exists.
+description: Stage 4. One structured output — the score, where the person stands, the honest limits personalized to them, and a disclaimer — delivered with care. Handles the follow-up state and the explain-my-result vs tell-me-what-to-do-medically boundary (REP-1..REP-14). Needs interpret's placement (INT-1), or interpret's refusal.
 ---
 
 # report
@@ -10,8 +10,9 @@ be treated as simple. Saying *"here's a useful idea, and here's why it might mea
 clearly, to someone who knows nothing about genetics, is the single hardest thing this product
 does. That sentence is the design target (`REP-5`).
 
-Blocked until `INT-1` lands, because there is no placement to report. Blocked does not mean
-unwritten: everything below is the behaviour, and the follow-up state is exercisable now.
+It needs what `interpret` produced: a placement against a reference built for this person
+(`INT-1`), or `interpret`'s refusal to place them (`INT-2`) with the provider's reason. Both are
+reportable; only a placement has a percentile in it.
 
 ## The framing, before any wording
 
@@ -34,8 +35,10 @@ One structured output:
    show it. The quantity is `resolved_weight_fraction`, a top-level key of
    `runs/<RUN_ID>/score/coverage_<PGS>.json` (written by `tools/weight_coverage.py measure`). Read
    that **measured** file, not `select`'s `coverage_est_<PGS>.json` — estimate mode emits the same
-   key name for a pre-imputation, typed-only quantity, so pulling the wrong file understates
-   coverage to the person.
+   key name for a pre-imputation **upper bound** (typed weight plus every panel position counted as
+   if it imputed well), so pulling the wrong file overstates coverage to the person. The measured
+   file says `"resolved_weight_fraction_is": "measured_post_imputation"`; if yours does not, it is
+   the wrong file.
 
 ## A percentile is not a risk, and it does not sit still (`REP-3`)
 

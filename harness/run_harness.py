@@ -68,7 +68,60 @@ def _print_gate(m):
         print("      scrubbed %-31s %d substitution(s)" % (sc["path"], n))
 
 
+def model_mix_problem(arm, pass_name, model):
+    """A results/<arm>/<pass>/ block is one corpus pass, and a pass is one model. Batches resume
+    by skipping cases already filed, so resuming a pass begun on another model would file the
+    rest of it on this one without a word. Refuse instead. Older manifests have no `model` key
+    and their model is unknown here, which is also a refusal."""
+    if not (arm and pass_name):
+        return None
+    block = os.path.join(orchestrator.RESULTS_ROOT, arm, pass_name)
+    seen = {}
+    for case in sorted(os.listdir(block)) if os.path.isdir(block) else []:
+        path = os.path.join(block, case, "manifest.json")
+        try:
+            with open(path) as fh:
+                got = (json.load(fh).get("model") or {}).get("requested")
+        except (OSError, ValueError):
+            continue
+        if got != model:
+            seen.setdefault(got, case)
+    if not seen:
+        return None
+    return ("results/%s/%s/ already holds cases run on %s (e.g. %s); this run is on %s. A pass "
+            "is one model: start a new --pass for this one."
+            % (arm, pass_name,
+               ", ".join("an unrecorded model" if m is None else m for m in seen),
+               next(iter(seen.values())), model))
+
+
 def cmd_run(args):
+    problem = model_mix_problem(getattr(args, "arm", None), getattr(args, "pass_name", None),
+                                args.model)
+    if problem:
+        sys.exit("run_harness.py: " + problem)
+    # The agent is the host's `claude`, run inside the sandbox. If that binary cannot run, every
+    # case dies in well under a second with "execvp claude: Permission denied" -- the same
+    # signature SETUP.md attributes to a CLI version problem. On 2026-10-08 it was a
+    # half-finished npm reinstall that left a 500-byte stub at bin/claude.exe. Say which.
+    try:
+        import subprocess
+        v = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=60)
+        cli_ok = v.returncode == 0 and "Claude Code" in v.stdout
+        cli_msg = (v.stdout + v.stderr).strip()[:300]
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        cli_ok, cli_msg = False, str(exc)
+    if not cli_ok:
+        sys.exit("run_harness.py: the claude CLI on this host does not run (%s). Every agent "
+                 "would die at launch. Reinstall it (SETUP.md section 4) and check "
+                 "`claude --version` before running a case." % cli_msg)
+    if args.stop_after not in ("door", "ancestry", "select") and not args.bare:
+        os.makedirs(config.SANDBOXES, exist_ok=True)
+        free_gb = shutil.disk_usage(config.SANDBOXES).free / 1e9
+        if free_gb < config.FULL_RUN_MIN_FREE_GB:
+            sys.exit("run_harness.py: %.1f GB free under %s; a run past select needs about %d GB "
+                     "(imputed genome, provider panel). Free space or use --stop-after select."
+                     % (free_gb, config.SANDBOXES, config.FULL_RUN_MIN_FREE_GB))
     o = orchestrator.Orchestrator(
         run_id=args.run_id, patient_file=args.patient, persona_name=args.persona,
         backend=args.backend, model=args.model, runs_root=args.runs_root,
@@ -303,7 +356,9 @@ def main():
         p.add_argument("--patient", help="the person's genotype file")
         p.add_argument("--persona", default="p01", help="persona id, for unattended runs")
         p.add_argument("--backend", choices=["persona", "human"], default="persona")
-        p.add_argument("--model", help="model for the spawned agents")
+        p.add_argument("--model", default=config.DEFAULT_MODEL,
+                       help="model for all three spawned agents (default: config.DEFAULT_MODEL, "
+                            "%s)" % config.DEFAULT_MODEL)
 
     r = sub.add_parser("run", help="stage, gate, and run the pipeline end to end")
     common(r)

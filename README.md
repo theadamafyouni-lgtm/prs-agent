@@ -25,8 +25,8 @@ number anyway is the failure.
 
 ## What you need
 
-A Linux machine. Ubuntu 22.04 or 24.04, 8 cores, 16 GB RAM, and **at least 75 GB
-of free disk**: rebuilding the reference data peaks near 62 GB, and each running case
+A Linux machine. Ubuntu 22.04 or 24.04, 8 cores, 16 GB RAM, and **at least 95 GB
+of free disk**: rebuilding the reference data peaks near 78 GB, and each running case
 needs room of its own. A single case takes 25 to 40 minutes.
 
 You will also need a Claude account, because the agent under test is Claude Code
@@ -39,7 +39,7 @@ The macOS path exists but is not in this repository yet. See
 
 ## Setup
 
-Five steps. The reference data is about 49 GB and takes the longest: read
+Five steps. The reference data is about 65 GB and takes the longest: read
 `SETUP.md` §8 before starting. It is rebuilt from public sources and checked by
 sha256 against the copy that produced the published results, except for a few
 files §8 names.
@@ -61,13 +61,14 @@ Then sign in, **in this order**:
 
 ```bash
 claude                                             # sign in, then /exit
-npm install -g @anthropic-ai/claude-code@2.1.224   # re-pin AFTER signing in
+npm install -g @anthropic-ai/claude-code@2.1.293   # re-pin AFTER signing in
 ```
 
 The order matters and is not the obvious one. Signing in silently upgrades the
-CLI, and newer versions cannot open their scratch directory inside the sandbox.
+CLI, and some versions cannot open their scratch directory inside the sandbox.
 Get it backwards and every case dies in under a second with a permissions error
-that is really a version error.
+that is really a version error. (2.1.293 is the version checked with the agent's
+model, `claude-opus-5-5`; the published corpus ran 2.1.224 with `claude-opus-4-8`.)
 
 `preflight.py` is the thing to run whenever something behaves strangely. Every
 environment problem we hit was silent: a missing Python package made the agent

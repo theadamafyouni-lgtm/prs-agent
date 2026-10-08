@@ -33,21 +33,27 @@ distinguishable afterwards from one that had to build its own.
 What the harness DOES record is whether the inputs matched, so a run where the INT-1 arm was
 never truly exercised is visible as such afterwards rather than being read as a pass.
 """
+import hashlib
 import json
 import os
+import re
 import shutil
+import stat
 
 from . import config, staging
 
-# The seven basenames main() constructs through `I = lambda name: join(args.inputs, name)`.
-# There is no per-file CLI flag, so these names are the interface.
+# The staged basenames. projection.json, ref_pca.eigenvec, ref_pca.eigenval and
+# sample_labels.json are read by exactly these names through main()'s
+# `I = lambda name: join(args.inputs, name)` -- there is no per-file flag for them, so the
+# names are the interface. The rest are passed to the tool as arguments.
 PROVIDER_INPUTS = {
     "dosages": "dosages_leaveout_{pgs}.tsv",
+    "score_input": "plink_score_input.tsv",
     "scoring": "{pgs}_hmPOS_GRCh37.txt.gz",
     "projection": "projection.json",
     "eigenvec": "ref_pca.eigenvec",
     "eigenval": "ref_pca.eigenval",
-    "panel": "integrated_call_samples_v3.20130502.ALL.panel",
+    "labels": "sample_labels.json",
     "ref_vcf": "ref_1kg_{pgs}.vcf.gz",
 }
 
@@ -80,10 +86,12 @@ Two outcomes are correct:
     than refusing loudly.
 
 Whichever you do, every field the contract requires must be present. A refusal artifact still
-needs `source`, `version_string`, `ancestry_grouping_definition`, `cohort_construction_rule`,
-`n_participants`, `too_few_threshold_used`, `assay_layer`, `scoring_parity` and
-`distribution` -- with nulls where a refusal makes a value meaningless, not zeros. A zero
-quantile is a claim; a null is an absence.
+needs `usable`, `reason`, `model` (with `pgs_id` and `sha256` equal to the request's -- a
+refusal for another scoring file is not this request's refusal), `source`, `version_string`,
+`ancestry_grouping_definition`, `cohort_construction_rule`, `n_participants`,
+`too_few_threshold_used`, `assay_layer`, `scoring_parity` and `distribution` -- with nulls
+where a refusal makes a value meaningless, not zeros. A zero quantile is a claim; a null is an
+absence.
 
 ## The tools, and how they are invoked
 
@@ -92,16 +100,29 @@ on, because a default would be one run's value applied to every other run:
 
     python3 build_reference.py \\
       --dosages inputs/<the dosages file named in INPUTS.md> \\
+      --score-input inputs/plink_score_input.tsv \\
       --scoring inputs/<the scoring file> \\
       --ref-vcf inputs/<the reference panel VCF> \\
+      --request request.json \\
       --effect-weight-col <the weight column, read off the scoring file's own header> \\
+      --reference-assay "<what assay produced the reference genotypes, in your words>" \\
       --k <how many nearest reference samples to select> \\
       --min-cohort <refuse below this cohort size> \\
+      --k-rationale "<why you chose these values>" \\
       --workdir work --out {out}
+
+`--score-input` is the file the patient's own score was computed from. The cohort is scored
+from that same file by the same plink2 recipe, and the tool reports how many of its variants
+plink2 actually used for each side; `scoring_parity` follows from those counts.
 
 `--k` and `--min-cohort` are yours to choose and the contract asks you to state what you
 used -- `cohort_construction_rule` and `too_few_threshold_used` are required fields. There is
-no derived value for either; say what you chose and why.
+no derived value for either; say what you chose and why, in `--k-rationale`.
+
+`--max-kth-distance` is also available: refuse when the k-th nearest reference sample is
+further than that distance in PC space. It has no default and the tool applies no check
+without it. Whether to set one, and to what, is your call; the artifact records the value
+used, or that there was none, and `--k-rationale` is where to say why.
 
 `--expected-abs-beta` is OPTIONAL and is a regression guard against a PRIOR run of this same
 patient and model. Do not compute it from the very data it would check -- that turns a real
@@ -127,6 +148,21 @@ proportionally longer for a larger one. Treat that as an order of magnitude and 
 deadline. **Running longer than the estimate is not a reason to refuse** -- if you decide a
 usable distribution cannot be built, the `reason` must name the actual cause, and "it was
 slower than the brief said" is not one.
+
+**A command that runs longer than one tool call.** Each Bash call you make is cut off at ten
+minutes at most, and at two unless you ask for more, and a bare long `sleep` is refused. The
+panel build, and `build_reference.py` on a large model, can take longer than that. So start it in
+the background, then wait for it with calls that each return inside one tool call -- give each
+of those a 600000 ms timeout:
+
+    nohup python3 build_reference_panel.py ... > work/panel.log 2>&1 &
+    timeout 540 bash -c 'until [ -e inputs/<panel basename>.provenance.json ]; do sleep 20; done'; tail -3 work/panel.log
+
+The panel builder writes `<its --out>.provenance.json` last, after the VCF and its index, so
+that file existing means the panel is complete. Repeat the wait until it exists or the log
+shows the builder died. Do the same for `build_reference.py` (it writes the artifact path
+last). **Your background job dies when your turn ends**: do not finish your turn while a build
+is still running.
 
 Build it at the MODEL's positions, which is what the command
 above does: a patient's imputed dosages come out of this same panel, so building at the
@@ -155,12 +191,211 @@ class AmbiguousInput(Exception):
     """
 
 
+class OutsideRun(Exception):
+    """A path the agent supplied cannot be taken: it resolves outside the requesting run's
+    own directory, or what it names there is not a regular file.
+
+    The harness copies these files with its own authority, into a sandbox the requesting
+    agent cannot reach. A request naming /etc/..., another run, or a symlink that points out
+    of the run would have the harness fetch it on the agent's behalf. A FIFO or a device
+    would hang or exhaust the harness reading it. Refused, not staged.
+
+    The message never says where a path resolved to. That would tell the sandboxed agent
+    where a host link points, and whether a host path exists.
+    """
+
+
+# JSON the harness parses out of a sandbox -- the request, a projection, a basis's
+# reference_build.json, the provider's artifact -- is read whole into memory, so it is
+# bounded. A technical limit, far above any such file: a sparse file can claim any size.
+JSON_READ_LIMIT = 64 << 20
+
+
+def _under(path, root):
+    """True if `path` is `root` or below it, compared as given (nothing resolved)."""
+    root = root.rstrip(os.sep) or os.sep
+    return path == root or path.startswith(root + os.sep)
+
+
+def contained(path, root):
+    """realpath(path) if it lies inside realpath(root), else None.
+
+    Symlinks are resolved before the comparison, so a link inside the run that points out
+    of it is outside. realpath does not need the path to exist, so the answer is the same
+    whether or not the target does.
+    """
+    rp = os.path.realpath(path)
+    return rp if _under(rp, os.path.realpath(root)) else None
+
+
+def real_run_dir(prs_root, run_id):
+    """The requesting run's directory, by its real path, or OutsideRun.
+
+    `runs/<RUN>` must be a real directory where it says it is. The sandbox is the agent's to
+    write, so it can replace `runs/<RUN>` (or `runs`) with a link to anywhere; every
+    containment check below would then be against wherever that link points.
+    """
+    lexical = os.path.join(prs_root, "runs", run_id)
+    expected = os.path.join(os.path.realpath(prs_root), "runs", run_id)
+    if (os.path.islink(lexical) or os.path.realpath(lexical) != expected
+            or not os.path.isdir(expected)):
+        raise OutsideRun("refused: runs/%s is not a plain directory inside the sandbox"
+                         % run_id)
+    return expected
+
+
+def resolve_inside(path, root, base, what):
+    """The real path `path` names, if it lies inside `root`; else OutsideRun.
+
+    `path` is taken relative to `base` when it is not absolute. Decided before anything is
+    opened and whether or not the path exists, so the answer is no oracle for host paths.
+    """
+    if not isinstance(path, str) or not path:
+        raise OutsideRun("refused: %s is not a path" % what)
+    ab = os.path.normpath(path if os.path.isabs(path) else os.path.join(base, path))
+    real = os.path.realpath(ab)
+    if not _under(real, root):
+        raise OutsideRun("refused: %s %r is not inside the requesting run's directory"
+                         % (what, path))
+    return real
+
+
+def _fd_path(fd):
+    """The path the kernel holds for an open descriptor, or None where it will not say."""
+    try:
+        return os.readlink("/proc/self/fd/%d" % fd)
+    except OSError:
+        pass
+    try:
+        import fcntl
+        if hasattr(fcntl, "F_GETPATH"):
+            buf = fcntl.fcntl(fd, fcntl.F_GETPATH, b"\0" * 1024)
+            return buf.split(b"\0", 1)[0].decode("utf-8", "replace")
+    except (OSError, ImportError):
+        pass
+    return None
+
+
+def open_regular(real, root, what, limit=None):
+    """Open a file already resolved inside `root`, and check what was actually opened.
+
+    The check-then-open window is closed by checking the descriptor: the kernel's own path
+    for it must still lie inside `root`, so a directory swapped for a link after
+    resolve_inside() is caught here. O_NOFOLLOW refuses a final-component link and
+    O_NONBLOCK keeps a FIFO from hanging the open. FileNotFoundError passes through: an
+    absent input is reported as absent, not refused.
+    """
+    flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+             | getattr(os, "O_CLOEXEC", 0))
+    try:
+        fd = os.open(real, flags)
+    except OSError as exc:
+        if isinstance(exc, FileNotFoundError):
+            raise
+        raise OutsideRun("refused: %s cannot be opened as a plain file (%s)"
+                         % (what, type(exc).__name__))
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise OutsideRun("refused: %s is not a regular file" % what)
+        held = _fd_path(fd)
+        if held is not None and not _under(held, os.path.realpath(root)):
+            raise OutsideRun("refused: %s was moved outside the requesting run's "
+                             "directory while it was being read" % what)
+        if limit is not None and st.st_size > limit:
+            raise OutsideRun("refused: %s is %d bytes, over the %d-byte limit for a file "
+                             "the harness parses" % (what, st.st_size, limit))
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def read_regular(real, root, what, limit=JSON_READ_LIMIT):
+    fd = open_regular(real, root, what, limit)
+    with os.fdopen(fd, "rb") as fh:
+        data = fh.read(limit + 1 if limit is not None else -1)
+    if limit is not None and len(data) > limit:
+        raise OutsideRun("refused: %s grew past the %d-byte limit while it was being read"
+                         % (what, limit))
+    return data
+
+
+def sha256_regular(real, root, what):
+    fd = open_regular(real, root, what)
+    h = hashlib.sha256()
+    with os.fdopen(fd, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def open_dir_chain(base_real, parts, create=False):
+    """A descriptor for base_real/parts..., walked one component at a time without
+    following a link at any step. `create` makes missing components.
+
+    Every write the harness makes into an agent-writable tree goes through this, because a
+    link planted at any component would otherwise carry the harness's write out of it.
+    """
+    dflags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    fd = os.open(base_real, dflags)
+    try:
+        for part in parts:
+            if not part or part in (".", "..") or os.sep in part:
+                raise OutsideRun("refused: %r is not a single path component" % part)
+            try:
+                nxt = os.open(part, dflags | getattr(os, "O_NOFOLLOW", 0), dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(part, 0o755, dir_fd=fd)
+                nxt = os.open(part, dflags | getattr(os, "O_NOFOLLOW", 0), dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+    except OSError as exc:
+        os.close(fd)
+        if isinstance(exc, FileNotFoundError):
+            raise
+        raise OutsideRun("refused: %s is not a plain directory (%s)"
+                         % (os.path.join(*parts) if parts else base_real,
+                            type(exc).__name__))
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def write_in_dir(dir_fd, name, data):
+    """Write `data` to dir_fd/name by a fresh temp file and a rename.
+
+    The temp file is created exclusively and never through a link, and the rename replaces
+    whatever directory entry `name` is -- a planted link included -- rather than writing
+    through it.
+    """
+    if not name or name in (".", "..") or os.sep in name:
+        raise OutsideRun("refused: %r is not a file name" % name)
+    tmp = ".%s.%d.tmp" % (name, os.getpid())
+    try:
+        os.unlink(tmp, dir_fd=dir_fd)
+    except FileNotFoundError:
+        pass
+    flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+             | getattr(os, "O_CLOEXEC", 0))
+    fd = os.open(tmp, flags, 0o644, dir_fd=dir_fd)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+
+
 class ProviderHandoff:
     def __init__(self, sandbox_root, record, transcript):
         self.root = sandbox_root
-        self.inputs = os.path.join(sandbox_root, "inputs")
-        self.workdir = os.path.join(sandbox_root, "work")
-        self.out = os.path.join(sandbox_root, "reference_distribution.json")
+        self.root_real = os.path.realpath(sandbox_root)
+        self.inputs = os.path.join(self.root_real, "inputs")
+        self.workdir = os.path.join(self.root_real, "work")
+        self.out = os.path.join(self.root_real, "reference_distribution.json")
         self.record = record
         self.transcript = transcript
         self.staged = {}
@@ -168,6 +403,11 @@ class ProviderHandoff:
         self.request = None
         self.pgs = None
         self.ambiguous = None
+        self.refused = None
+        self.basis = None
+        self.run_dir = None
+        self.prs_real = None
+        self._artifact_bytes = None
         # Set at stage() time: whether the provider has what it needs to build a missing
         # reference panel itself. Recorded so a run where it could not is distinguishable
         # from one where it chose not to.
@@ -175,106 +415,192 @@ class ProviderHandoff:
         self.panel_buildable = os.path.isdir(self.phase3_dir)
 
     # -- staging ---------------------------------------------------------
-    def stage(self, request_path, prs_sandbox_root):
-        """Copy in what exists, name what does not, and record both."""
-        os.makedirs(self.inputs, exist_ok=True)
-        os.makedirs(self.workdir, exist_ok=True)
+    def _reset(self):
+        """Empty what an earlier handoff left in the provider sandbox.
 
-        with open(request_path) as fh:
-            self.request = json.load(fh)
-        self.pgs = ((self.request.get("model") or {}).get("pgs_id") or "").strip()
+        The sandbox is one directory reused for every request in a run. Left as it was, a
+        file INPUTS.md calls absent could still sit in inputs/ from the last request -- and
+        be used, under this request's name -- and a provider that wrote nothing would have
+        the last request's artifact read back as this one's. A link the last provider left
+        at one of these names would also carry the harness's next write out of the sandbox.
+        """
+        for name in ("request.json", "reference_distribution.json", "inputs", "work"):
+            p = os.path.join(self.root_real, name)
+            try:
+                st = os.lstat(p)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISDIR(st.st_mode):
+                shutil.rmtree(p)
+            else:
+                os.unlink(p)
+        os.makedirs(self.inputs)
+        os.makedirs(self.workdir)
+
+    def stage(self, request_path, prs_sandbox_root, run_dir, request_bytes=None):
+        """Copy in what exists, name what does not, and record both.
+
+        Every file taken from the PRS sandbox on the strength of a path the agent wrote must
+        resolve inside `run_dir`, the requesting run's own runs/<RUN>/ directory, by its
+        real path (see real_run_dir). `request_bytes` is the request as the caller already
+        read it, so what is staged is what was hashed.
+        """
+        self._reset()
+        self.run_dir = os.path.realpath(run_dir)
+        self.prs_real = os.path.realpath(prs_sandbox_root)
+        self.prs_root = prs_sandbox_root
+
+        if request_bytes is None:
+            request_path = resolve_inside(request_path, self.run_dir, prs_sandbox_root,
+                                          "the request")
+            request_bytes = read_regular(request_path, self.run_dir, "the request")
+        try:
+            self.request = json.loads(request_bytes)
+        except ValueError:
+            self.request = None
+        if not isinstance(self.request, dict):
+            raise OutsideRun("refused: the request is not a JSON object")
+        model = self.request.get("model")
+        self.pgs = (str((model if isinstance(model, dict) else {}).get("pgs_id") or "")
+                    .strip())
+        # The id goes into staged file names, so it must be a bare id: anything else could
+        # carry a path component into the provider sandbox's directory layout.
+        if self.pgs and not re.fullmatch(r"PGS[0-9]{6}", self.pgs):
+            raise OutsideRun("refused: model.pgs_id %r is not a PGS Catalog id" % self.pgs)
 
         # The request is copied, never linked. Its own file references point into the PRS
         # sandbox, which the provider cannot reach, so the copy is rewritten to name the
         # local staged files instead -- otherwise the provider would read paths it cannot
         # open and could mistake an unreachable path for a missing input.
-        req_local = os.path.join(self.root, "request.json")
+        req_local = os.path.join(self.root_real, "request.json")
         local = dict(self.request)
-        patient = dict(local.get("patient") or {})
+        patient = local.get("patient")
+        patient = dict(patient if isinstance(patient, dict) else {})
         patient["resolved_positions_manifest_original"] = patient.get(
             "resolved_positions_manifest")
         patient["resolved_positions_manifest"] = os.path.join(
             "inputs", PROVIDER_INPUTS["dosages"].format(pgs=self.pgs or "UNKNOWN"))
+        patient["score_input_original"] = patient.get("score_input")
+        patient["score_input"] = os.path.join("inputs", PROVIDER_INPUTS["score_input"])
         local["patient"] = patient
         local["_harness_note"] = (
             "Paths rewritten to the local inputs/ directory. The original values, which "
             "pointed into the requesting agent's sandbox, are preserved alongside.")
-        with open(req_local, "w") as fh:
-            json.dump(local, fh, indent=2)
+        root_fd = open_dir_chain(self.root_real, ())
+        try:
+            write_in_dir(root_fd, "request.json",
+                         json.dumps(local, indent=2).encode("utf-8"))
+        finally:
+            os.close(root_fd)
         self.record.add(req_local, request_path, "int1-request")
 
         want = {k: v.format(pgs=self.pgs or "UNKNOWN") for k, v in PROVIDER_INPUTS.items()}
 
         # From the requesting run.
-        self._try(want["dosages"], self._resolve_dosages(prs_sandbox_root),
-                  "the patient's resolved per-variant dosages, from the requesting run")
-        self._try(want["scoring"], self._resolve_scoring(prs_sandbox_root),
-                  "the harmonized scoring file the requesting run actually used")
-        self._try(want["projection"], self._resolve_projection(prs_sandbox_root),
-                  "the patient's PCA projection, from the requesting run")
+        self._try(want["dosages"], self._resolve_patient_path("resolved_positions_manifest",
+                                                              prs_sandbox_root),
+                  "the patient's resolved per-variant dosages, from the requesting run",
+                  self.run_dir)
+        self._try(want["score_input"], self._resolve_patient_path("score_input",
+                                                                  prs_sandbox_root),
+                  "the score input the patient's raw score was computed from; the cohort "
+                  "is scored from this same file", self.run_dir)
+        self._try(want["scoring"], self._resolve_scoring(),
+                  "the harmonized scoring file the requesting run actually used",
+                  self.run_dir)
+        self._try(want["projection"], self._resolve_projection(),
+                  "the patient's PCA projection, from the requesting run", self.run_dir)
 
-        # From reference data. The eigenvec MUST be the basis the patient's projection was
-        # computed against; a mismatched pair puts the patient's coordinates in a different
-        # decomposition from the panel's, and every distance downstream is meaningless.
-        # build_reference.py has a hard self-check for exactly this and stops rather than
-        # reconciling, which is the right behaviour -- so the harness stages the basis the
-        # run recorded, and if the run built its own, that is the one that travels.
-        base = self._resolve_pca_basis(prs_sandbox_root)
-        self._try(want["eigenvec"], os.path.join(base, "ref_pca.eigenvec") if base else None,
-                  "the PCA basis the patient's projection was computed against")
-        self._try(want["eigenval"], os.path.join(base, "ref_pca.eigenval") if base else None,
-                  "eigenvalues of that basis; absent, the artifact silently changes shape")
-        self._try(want["panel"],
-                  os.path.join(config.REFDATA_SRC, "ancestry-ref",
-                               "integrated_call_samples_v3.20130502.ALL.panel"),
-                  "1000 Genomes sample-to-population labels")
+        # The PCA basis. It MUST be the one the patient's projection was computed against;
+        # a mismatched pair puts the patient's coordinates in a different decomposition from
+        # the panel's, and every distance downstream is meaningless. build_reference.py has
+        # a hard self-check for exactly this and stops rather than reconciling. The basis is
+        # identified by the projection's own record of it, and its labels travel with it:
+        # they are the labels the projection's recorded neighbours were counted with.
+        # The projection is read from the copy just staged, so the basis is matched to the
+        # projection the provider will actually use.
+        staged_projection = (os.path.join(self.inputs, want["projection"])
+                             if want["projection"] in self.staged else None)
+        base = self._resolve_pca_basis(self.prs_real, staged_projection)
 
-        # The model-specific reference VCF. Present for exactly one model.
+        def in_base(f):
+            return self._basis_file(base, f) if base else None
+
+        self._try(want["eigenvec"], in_base("ref_pca.eigenvec"),
+                  "the PCA basis the patient's projection was computed against", self.prs_real)
+        self._try(want["eigenval"], in_base("ref_pca.eigenval"),
+                  "eigenvalues of that basis; absent, the artifact silently changes shape",
+                  self.prs_real)
+        self._try(want["labels"], in_base("sample_labels.json"),
+                  "that basis's own sample-to-population labels, the ones ancestry.py "
+                  "counted the projection's recorded neighbours with", self.prs_real)
+
+        # The model-specific reference VCF. Present for exactly one model. It comes from the
+        # harness's own tree, not from anything the agent wrote.
         native = os.path.join(config.PROVIDER_SRC, "inputs",
                               PROVIDER_INPUTS["ref_vcf"].format(pgs=PROVIDER_NATIVE_PGS))
         self._try(want["ref_vcf"], native if self.pgs == PROVIDER_NATIVE_PGS else None,
-                  "1000 Genomes genotypes at this model's positions")
+                  "1000 Genomes genotypes at this model's positions", None)
 
         self._write_inputs_readme(want)
         return self.summary()
 
-    def stage_guarded(self, request_path, prs_sandbox_root):
-        """stage(), but an ambiguous input is a reported refusal rather than a coin flip."""
+    def stage_guarded(self, request_path, prs_sandbox_root, run_dir, request_bytes=None):
+        """stage(), but an ambiguous input is a reported refusal rather than a coin flip,
+        and a path outside the requesting run is refused rather than fetched."""
         try:
-            return self.stage(request_path, prs_sandbox_root)
+            return self.stage(request_path, prs_sandbox_root, run_dir, request_bytes)
         except AmbiguousInput as exc:
             self.ambiguous = str(exc)
             return self.summary()
+        except OutsideRun as exc:
+            self.refused = str(exc)
+            return self.summary()
 
-    def _try(self, basename, src, why):
+    def _try(self, basename, src, why, root):
+        """Stage `src` as inputs/<basename>, or record it absent.
+
+        `root` is the tree `src` must stay inside while it is read -- the run's directory or
+        the sandbox -- and None only for the harness's own files. The copy is made from the
+        descriptor that was checked, into a fresh inputs/ (see _reset), and never through a
+        link at the destination.
+        """
         dest = os.path.join(self.inputs, basename)
-        if src and os.path.exists(src):
-            shutil.copyfile(src, dest)
-            rec = self.record.add(dest, src, "provider-input", note=why)
-            self.staged[basename] = {"source": src, "sha256": rec.get("sha256"),
-                                     "bytes": rec.get("bytes"), "why": why}
-        else:
+        fd = None
+        if src:
+            try:
+                fd = (open_regular(src, root, basename) if root is not None
+                      else os.open(src, os.O_RDONLY))
+            except FileNotFoundError:
+                fd = None
+        if fd is None:
             self.absent[basename] = {"why_wanted": why,
                                      "looked_for": src or "(nothing to look for)"}
+            return
+        flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+                 | getattr(os, "O_CLOEXEC", 0))
+        with os.fdopen(fd, "rb") as fin, os.fdopen(os.open(dest, flags, 0o644), "wb") as fout:
+            shutil.copyfileobj(fin, fout, 1 << 20)
+        rec = self.record.add(dest, src, "provider-input", note=why)
+        self.staged[basename] = {"source": src, "sha256": rec.get("sha256"),
+                                 "bytes": rec.get("bytes"), "why": why}
 
     # -- resolution ------------------------------------------------------
-    def _resolve_dosages(self, prs_root):
-        """The dosages file the request itself names, resolved against the sandbox.
+    def _resolve_patient_path(self, field, prs_root):
+        """A file the request's patient block names, resolved against the sandbox.
 
-        The request's `resolved_positions_manifest` is authoritative. Guessing a filename
-        here would risk handing over a different variant set from the one the score was
-        computed on, and every parse would succeed -- the failure would be silent and would
-        land in the percentile.
+        The request is authoritative for which file. Guessing a filename here would risk
+        handing over a different variant set from the one the score was computed on, and
+        every parse would succeed -- the failure would be silent and would land in the
+        percentile. Where the file is, though, is checked rather than taken: it must resolve
+        inside the requesting run's directory, or the request is refused -- whether or not
+        it exists, so a refusal says nothing about a path outside the run.
         """
-        p = ((self.request.get("patient") or {}).get("resolved_positions_manifest") or "")
+        patient = self.request.get("patient")
+        p = (patient if isinstance(patient, dict) else {}).get(field)
         if not p:
             return None
-        cand = p if os.path.isabs(p) else os.path.join(prs_root, p)
-        if os.path.exists(cand):
-            return cand
-        # The request may name a path relative to the run root rather than the sandbox root.
-        alt = os.path.join(prs_root, p.lstrip("./"))
-        return alt if os.path.exists(alt) else None
+        return resolve_inside(p, self.run_dir, prs_root, "patient.%s" % field)
 
     @staticmethod
     def _all(root, pred):
@@ -295,41 +621,102 @@ class ProviderHandoff:
             raise AmbiguousInput("%s is ambiguous: %d candidates -- %s" % (what, len(hits), hits))
         return hits[0]
 
-    def _resolve_scoring(self, prs_root):
+    def _in_run(self, hit):
+        real = contained(hit, self.run_dir)
+        if real is None:
+            raise OutsideRun("refused: %s links outside the requesting run's directory"
+                             % os.path.relpath(hit, self.run_dir))
+        return real
+
+    def _resolve_scoring(self):
         if not self.pgs:
             return None
         # Exact basename, not startswith: `PGS0_hmPOS_GRCh38.txt.gz` also starts with the
         # model id, and staging it under the GRCh37 name would present a build mismatch to
         # the provider as a match.
         want = PROVIDER_INPUTS["scoring"].format(pgs=self.pgs)
-        return self._one(self._all(os.path.join(prs_root, "runs"),
-                                   lambda c, f: f == want), "the scoring file")
+        hit = self._one(self._all(self.run_dir, lambda c, f: f == want), "the scoring file")
+        return self._in_run(hit) if hit else None
 
-    def _resolve_projection(self, prs_root):
-        return self._one(self._all(os.path.join(prs_root, "runs"),
-                                   lambda c, f: f == "projection.json"), "projection.json")
+    def _resolve_projection(self):
+        hit = self._one(self._all(self.run_dir, lambda c, f: f == "projection.json"),
+                        "projection.json")
+        return self._in_run(hit) if hit else None
 
-    def _resolve_pca_basis(self, prs_root):
-        """Where the run's own PCA basis landed.
+    def _basis_file(self, base, f):
+        """base/f by its real path, which must lie inside the sandbox, or OutsideRun."""
+        real = contained(os.path.join(base, f), self.prs_real)
+        if real is None:
+            raise OutsideRun("refused: %s in a PCA basis directory links outside the sandbox"
+                             % f)
+        return real
 
-        refdata is read-only in the sandbox, so `ancestry.py build-ref --out-dir` cannot
-        write to its documented location and the agent must have chosen a writable one. This
-        finds it by looking for the files rather than by assuming a path.
+    def _resolve_pca_basis(self, prs_real, projection_path):
+        """The basis directory the patient's projection was computed against.
+
+        ancestry.py copies the basis's reference_build.json, generated_utc and all, into
+        projection.json as `reference_build`, so the basis is the directory whose own
+        reference_build.json equals that record exactly. Anything looser is ambiguous in a
+        sandbox that holds both refdata/ancestry-ref/hgdp_basis and a basis the agent built
+        under runs/<RUN>/: both carry ref_pca.eigenvec and ref_pca.afreq. No match leaves the
+        basis absent, which the provider sees and reports.
+
+        Every candidate file is opened as open_regular() opens a patient file, against the
+        sandbox: the agent writes the candidates under runs/<RUN>/, so one of them can be a
+        link out of the sandbox, a FIFO or a device, and the harness reads them itself.
         """
-        dirs = []
-        for cur, d, files in os.walk(prs_root):
+        try:
+            with open(projection_path, "rb") as fh:
+                want = json.loads(fh.read(JSON_READ_LIMIT + 1)).get("reference_build")
+        except (TypeError, OSError, ValueError, AttributeError):
+            want = None
+        if not want:
+            self.basis = {"dir": None, "why": "projection.json carries no reference_build"}
+            return None
+        dirs, n_bases = [], 0
+        for cur, d, files in os.walk(prs_real):
             d.sort()
-            if "ref_pca.eigenvec" in files and "ref_pca.afreq" in files:
-                dirs.append(cur)
-        return self._one(dirs, "the PCA basis directory")
+            if "ref_pca.eigenvec" not in files or "ref_pca.afreq" not in files:
+                continue
+            n_bases += 1
+            try:
+                data = read_regular(self._basis_file(cur, "reference_build.json"), prs_real,
+                                    "a PCA basis's reference_build.json")
+                if json.loads(data) == want:
+                    dirs.append(cur)
+            except (FileNotFoundError, ValueError):
+                continue
+        self.basis = {"n_basis_directories_found": n_bases, "candidates": dirs,
+                      "matched_on": "reference_build.json equal to projection.json's "
+                                    "reference_build"}
+        staged = ("ref_pca.eigenvec", "ref_pca.eigenval", "sample_labels.json")
+
+        def fingerprint(d):
+            out = []
+            for f in staged:
+                try:
+                    out.append(sha256_regular(self._basis_file(d, f), prs_real, f))
+                except FileNotFoundError:
+                    out.append(None)
+            return tuple(out)
+
+        # Copies of one basis are one basis: if every candidate's staged files hash the
+        # same, the choice between them changes nothing that is staged.
+        if len(dirs) > 1 and len({fingerprint(d) for d in dirs}) == 1:
+            dirs = dirs[:1]
+            self.basis["note"] = "identical copies; the first in walk order was staged"
+        base = self._one(dirs, "the PCA basis directory")
+        self.basis["dir"] = base
+        return base
 
     def _write_inputs_readme(self, want):
         lines = [
             "# What is in this directory",
             "",
-            "`build_reference.py` looks for each of these by an exact basename constructed",
-            "in `main()`. There is no per-file command-line flag, so a file under any other",
-            "name is invisible to it.",
+            "`build_reference.py` reads `projection.json`, `ref_pca.eigenvec`,",
+            "`ref_pca.eigenval` and `sample_labels.json` from here by those exact names; there",
+            "is no flag for them. The others are passed as arguments -- see the brief. The",
+            "request itself is `request.json`, one directory up.",
             "",
             "## Present",
             "",
@@ -392,8 +779,10 @@ class ProviderHandoff:
             "inputs_match_requested_model": matched,
             "staged": self.staged,
             "absent": self.absent,
-            "int1_arm_exercised": matched and not self.ambiguous,
+            "int1_arm_exercised": matched and not self.ambiguous and not self.refused,
             "ambiguous_input": self.ambiguous,
+            "refused_path": self.refused,
+            "pca_basis": self.basis,
             "panel_buildable": self.panel_buildable,
             "note": (
                 "The pre-staged reference VCF and two input basenames are specific to %s. "
@@ -413,22 +802,48 @@ class ProviderHandoff:
 
     # -- result ----------------------------------------------------------
     def read_artifact(self):
-        if not os.path.exists(self.out):
-            return None, "the provider produced no artifact at %s" % self.out
+        """The provider's artifact, read once, as bytes from a regular file in the sandbox.
+
+        The same bytes are what deliver_to() writes, so what is recorded and what is
+        delivered cannot differ. A link at the artifact's name is not followed: the provider
+        could otherwise have the harness read any host file and copy it to the agent.
+        """
+        self._artifact_bytes = None
         try:
-            with open(self.out) as fh:
-                art = json.load(fh)
-        except (json.JSONDecodeError, OSError) as exc:
+            data = read_regular(self.out, self.root_real, "the provider's artifact")
+        except FileNotFoundError:
+            return None, "the provider produced no artifact at %s" % self.out
+        except OutsideRun as exc:
+            return None, "the provider's artifact could not be taken: %s" % exc
+        try:
+            art = json.loads(data)
+        except ValueError as exc:
             return None, "the provider's artifact is not readable JSON: %s" % exc
+        self._artifact_bytes = data
         return art, None
 
-    def deliver_to(self, dest_path):
-        """Copy the artifact into the requesting sandbox and hash both ends."""
-        os.makedirs(os.path.dirname(os.path.abspath(dest_path)), exist_ok=True)
-        shutil.copyfile(self.out, dest_path)
+    def deliver_to(self, prs_real, run_id):
+        """Write the artifact into runs/<RUN>/interpret/provider_reference.json, and hash
+        both ends.
+
+        The PRS sandbox is the agent's to write, so the path is walked one directory at a
+        time without following a link, and the file is replaced by a rename rather than
+        written through: a link planted at any step would otherwise have this write land
+        wherever it points, with the harness's authority.
+        """
+        name = "provider_reference.json"
+        dfd = open_dir_chain(prs_real, ("runs", run_id, "interpret"), create=True)
+        try:
+            write_in_dir(dfd, name, self._artifact_bytes)
+            fd = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=dfd)
+            with os.fdopen(fd, "rb") as fh:
+                delivered = fh.read()
+        finally:
+            os.close(dfd)
         return {
-            "from": self.out, "to": dest_path,
-            "sha256_source": staging.sha256(self.out),
-            "sha256_delivered": staging.sha256(dest_path),
-            "bytes": os.path.getsize(dest_path),
+            "from": self.out,
+            "to": os.path.join(prs_real, "runs", run_id, "interpret", name),
+            "sha256_source": hashlib.sha256(self._artifact_bytes).hexdigest(),
+            "sha256_delivered": hashlib.sha256(delivered).hexdigest(),
+            "bytes": len(delivered),
         }
