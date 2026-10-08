@@ -1,9 +1,9 @@
 # INT-1 interface — the reference distribution
 
-`interpret` and `report` are built against this contract and **cannot close until a provider
-satisfies it.** The reference is being built separately. Nothing in this repo synthesises one:
-`tools/reference_adapter.py` refuses when the artifact is absent, because inventing a distribution
-to make the pipeline run would be the `JC-2` violation the product exists to avoid.
+`interpret` and `report` are built against this contract. The harness answers a request with a
+provider that builds the distribution for that request, or refuses with its reason. Nothing in this
+repo synthesises one: `tools/reference_adapter.py` stops when no artifact arrives, because inventing a
+distribution to make the pipeline run would be the `JC-2` violation the product exists to avoid.
 
 ---
 

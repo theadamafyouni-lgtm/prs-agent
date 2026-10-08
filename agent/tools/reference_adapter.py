@@ -92,8 +92,8 @@ def main():
 
     if not args.reference:
         blocked(args.run, args.out, 3, "reference_unavailable",
-                "No reference distribution artifact supplied. INT-1 is built separately and does "
-                "not exist yet, so interpret and report cannot close.",
+                "No reference distribution artifact supplied: no provider answered this request "
+                "(or its answer was not collected). Nothing is placed without one.",
                 {"request_echo": request})
     if not os.path.exists(args.reference):
         blocked(args.run, args.out, 3, "reference_unavailable",

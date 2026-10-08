@@ -149,6 +149,21 @@ deadline. **Running longer than the estimate is not a reason to refuse** -- if y
 usable distribution cannot be built, the `reason` must name the actual cause, and "it was
 slower than the brief said" is not one.
 
+**A command that runs longer than one tool call.** Each Bash call you make is cut off at ten
+minutes at most, and at two unless you ask for more, and a bare long `sleep` is refused. The
+panel build, and `build_reference.py` on a large model, can take longer than that. So start it in
+the background, then wait for it with calls that each return inside one tool call -- give each
+of those a 600000 ms timeout:
+
+    nohup python3 build_reference_panel.py ... > work/panel.log 2>&1 &
+    timeout 540 bash -c 'until [ -e inputs/<panel basename>.provenance.json ]; do sleep 20; done'; tail -3 work/panel.log
+
+The panel builder writes `<its --out>.provenance.json` last, after the VCF and its index, so
+that file existing means the panel is complete. Repeat the wait until it exists or the log
+shows the builder died. Do the same for `build_reference.py` (it writes the artifact path
+last). **Your background job dies when your turn ends**: do not finish your turn while a build
+is still running.
+
 Build it at the MODEL's positions, which is what the command
 above does: a patient's imputed dosages come out of this same panel, so building at the
 model's positions covers every position the patient could have resolved. Building at the
