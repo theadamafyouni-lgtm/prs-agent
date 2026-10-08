@@ -307,6 +307,7 @@ def deny_probe_paths(home):
         (p(AGENT, "OPEN_QUESTIONS.md"), "Q10 carries the final corrected answer"),
         (p(AGENT, "oracle"), "independent pgsc_calc verification outputs"),
         (p(AGENT, ".git"), "tracked docs; log subjects alone leak"),
+        (p(PRODUCT_ROOT, ".git"), "the repository's history; commit subjects alone leak"),
         (p(AGENT, "sim/personas"), "the persona files"),
         (p(AGENT, "refdata/ancestry-ref/build"), "deleted from the clone; assert the "
                                                  "original is unreachable too"),
@@ -433,6 +434,13 @@ KEYCHAIN_DIR = os.path.expanduser("~/.claude")
 # reproduction of it. --model applies to all three agents (agent under test, simulated person,
 # provider).
 DEFAULT_MODEL = "claude-opus-5-5"
+
+# Free disk a run past select needs under SANDBOXES. Measured on p29 (2026-10-08): the agent's
+# own PCA basis (~1 GB once its intermediates are dropped), the genome's imputed output
+# (~7.5 GB: the 302-sample cohort VCFs and the patient's), and the provider's reference panel
+# and work (~2-3 GB). A run that filled the disk mid-imputation was lost outright, ENOSPC in the
+# proxy log and all; refusing at launch costs nothing.
+FULL_RUN_MIN_FREE_GB = 15
 
 TIMEOUT_ASK_PERSON = 900          # a human may be typing
 # The provider may have to BUILD its reference panel before it can build a distribution,

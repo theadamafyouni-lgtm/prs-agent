@@ -555,7 +555,10 @@ def _chmod_tree(root, file_mode, dir_mode, shared=None):
                 st = os.lstat(p)
             except OSError:
                 continue
-            if not os.path.isdir(p) and st.st_nlink > 1:
+            # Only refdata is staged as hard links (cp -al). A file with extra links anywhere
+            # else was linked by something inside the run, and is frozen like any other.
+            if (not os.path.isdir(p) and st.st_nlink > 1
+                    and "refdata" in os.path.relpath(p, root).split(os.sep)):
                 if shared is not None:
                     shared.append(os.path.relpath(p, root))
                 continue

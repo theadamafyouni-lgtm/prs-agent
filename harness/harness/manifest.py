@@ -65,6 +65,17 @@ class Transcript:
         return out
 
 
+def _sha256_or_none(path):
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
 def host_facts():
     def _v(cmd):
         try:
@@ -82,7 +93,10 @@ def host_facts():
         "arch": platform.machine(),
         "python": platform.python_version(),
         "claude_cli": _v(["claude", "--version"]),
-        "plink2": _v([os.path.join(config.REFDATA_SRC, "bin", "plink2"), "--version"]),
+        # Hashed, not executed: the binary is the same inode as every run clone's (cp -al), so
+        # running it here as the harness user would make the host trust every sandbox's
+        # read-only bind having held. The sha256 identifies the build exactly.
+        "plink2_sha256": _sha256_or_none(os.path.join(config.REFDATA_SRC, "bin", "plink2")),
         "bcftools": _v(["bcftools", "--version"]),
         "sandbox_exec": os.path.exists("/usr/bin/sandbox-exec"),
     }
@@ -97,37 +111,70 @@ def source_revision():
     untracked scratch file read as dirty, and a dirty tree recorded no trace of what differed.
     So: dirty is True/False only when git answered, None when it did not; it counts tracked
     changes, staged or not, and untracked files are listed separately; and a dirty tree
-    records its changed paths and the sha256 of `git diff HEAD`, which is enough to check a
-    reconstruction byte for byte."""
+    records its changed paths and the sha256 of `git diff HEAD`. The diff's format is pinned
+    (no external diff, no textconv, no colour, no rename detection, fixed prefixes, full
+    index lines) so the hash depends on the tree, not on whoever's git config ran it. Any git
+    call that failed is named in git_errors and its field is null, never an empty answer."""
+    errors = []
+
     def _git(*args, raw=False):
         try:
             r = subprocess.run(["git", "-C", config.PRODUCT_ROOT] + list(args),
                                capture_output=True, timeout=20)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            errors.append("git %s: %s" % (args[0], exc))
             return None
         if r.returncode != 0:
+            errors.append("git %s: exit %d" % (args[0], r.returncode))
             return None
-        # Not .strip(): porcelain lines start with a status column that may be a space.
-        return r.stdout if raw else r.stdout.decode(errors="replace").rstrip("\n")
+        return r.stdout if raw else r.stdout.decode(errors="replace")
 
     head = _git("rev-parse", "HEAD")
-    tracked = _git("status", "--porcelain=v1", "--untracked-files=no")
-    untracked = _git("ls-files", "--others", "--exclude-standard")
-    diff = _git("diff", "HEAD", "--binary", raw=True) if tracked else None
-    changed = [line[3:] for line in tracked.splitlines() if line.strip()] if tracked else []
+    head = head.strip() if head else None
+    # -z: NUL-separated, paths never quoted; a rename record is followed by its source path.
+    tracked = _git("status", "--porcelain=v1", "-z", "--untracked-files=no")
+    changed = []
+    if tracked:
+        fields = tracked.split("\0")
+        i = 0
+        while i < len(fields):
+            rec = fields[i]
+            i += 1
+            if not rec:
+                continue
+            code, path = rec[:2], rec[3:]
+            if code[0] in "RC" or code[1] in "RC":
+                changed.append({"path": path, "from": fields[i] if i < len(fields) else None})
+                i += 1
+            else:
+                changed.append(path)
+    untracked = _git("ls-files", "-z", "--others", "--exclude-standard")
+    diff = None
+    if tracked:
+        diff = _git("-c", "core.quotepath=off", "diff", "--no-ext-diff", "--no-textconv",
+                    "--no-color", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/",
+                    "--full-index", "--binary", "HEAD", raw=True)
+    tags = _git("tag", "--points-at", "HEAD") if head else None
     dirty = None if (head is None or tracked is None) else bool(changed)
+    root = _git("rev-parse", "--show-toplevel")
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD")
     return {
-        "repo_root": _git("rev-parse", "--show-toplevel"),
+        "repo_root": root.strip() if root else None,
         "commit": head,
-        "branch": _git("rev-parse", "--abbrev-ref", "HEAD"),
-        "tags_at_commit": (_git("tag", "--points-at", "HEAD") or "").split() if head else None,
+        "branch": branch.strip() if branch else None,
+        "tags_at_commit": tags.split() if tags is not None else None,
         "dirty": dirty,
         "dirty_means": "tracked files differ from the commit, staged or not; untracked files "
                        "are listed separately and do not count. null = git did not answer.",
-        "changed_paths": changed[:200],
-        "n_changed_paths": len(changed),
+        "changed_paths": changed[:200] if tracked is not None else None,
+        "n_changed_paths": len(changed) if tracked is not None else None,
         "diff_head_sha256": hashlib.sha256(diff).hexdigest() if diff else None,
-        "untracked_paths": untracked.splitlines()[:200] if untracked else [],
+        "diff_format": "git diff --no-ext-diff --no-textconv --no-color --no-renames "
+                       "--src-prefix=a/ --dst-prefix=b/ --full-index --binary HEAD",
+        "git_version": (lambda v: v.strip() if v else None)(_git("--version")),
+        "untracked_paths": ([u for u in untracked.split("\0") if u][:200]
+                            if untracked is not None else None),
+        "git_errors": errors,
         # Kept under their old names so earlier readers of the manifest still find them.
         "build_head": head,
         "build_dirty": dirty,

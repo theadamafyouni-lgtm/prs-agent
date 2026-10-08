@@ -68,7 +68,45 @@ def _print_gate(m):
         print("      scrubbed %-31s %d substitution(s)" % (sc["path"], n))
 
 
+def model_mix_problem(arm, pass_name, model):
+    """A results/<arm>/<pass>/ block is one corpus pass, and a pass is one model. Batches resume
+    by skipping cases already filed, so resuming a pass begun on another model would file the
+    rest of it on this one without a word. Refuse instead. Older manifests have no `model` key
+    and their model is unknown here, which is also a refusal."""
+    if not (arm and pass_name):
+        return None
+    block = os.path.join(orchestrator.RESULTS_ROOT, arm, pass_name)
+    seen = {}
+    for case in sorted(os.listdir(block)) if os.path.isdir(block) else []:
+        path = os.path.join(block, case, "manifest.json")
+        try:
+            with open(path) as fh:
+                got = (json.load(fh).get("model") or {}).get("requested")
+        except (OSError, ValueError):
+            continue
+        if got != model:
+            seen.setdefault(got, case)
+    if not seen:
+        return None
+    return ("results/%s/%s/ already holds cases run on %s (e.g. %s); this run is on %s. A pass "
+            "is one model: start a new --pass for this one."
+            % (arm, pass_name,
+               ", ".join("an unrecorded model" if m is None else m for m in seen),
+               next(iter(seen.values())), model))
+
+
 def cmd_run(args):
+    problem = model_mix_problem(getattr(args, "arm", None), getattr(args, "pass_name", None),
+                                args.model)
+    if problem:
+        sys.exit("run_harness.py: " + problem)
+    if args.stop_after not in ("door", "ancestry", "select") and not args.bare:
+        os.makedirs(config.SANDBOXES, exist_ok=True)
+        free_gb = shutil.disk_usage(config.SANDBOXES).free / 1e9
+        if free_gb < config.FULL_RUN_MIN_FREE_GB:
+            sys.exit("run_harness.py: %.1f GB free under %s; a run past select needs about %d GB "
+                     "(imputed genome, provider panel). Free space or use --stop-after select."
+                     % (free_gb, config.SANDBOXES, config.FULL_RUN_MIN_FREE_GB))
     o = orchestrator.Orchestrator(
         run_id=args.run_id, patient_file=args.patient, persona_name=args.persona,
         backend=args.backend, model=args.model, runs_root=args.runs_root,
