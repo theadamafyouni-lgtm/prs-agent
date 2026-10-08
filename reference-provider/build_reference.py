@@ -16,7 +16,8 @@ Steps:
   2. Select the k nearest reference samples in PC space, from the basis samples that
      have genotypes in the reference VCF.
   3. Score them with plink2 from the patient's own score input, by the recipe
-     score_plink2.py scored the patient with, and count what plink2 actually used.
+     score_plink2.py scored the patient with plus --snps-only just-acgt, and count what
+     plink2 actually used.
   4. Emit the artifact, with every cohort member's raw score.
 """
 
@@ -2040,7 +2041,8 @@ def main():
         ac = cols.get("ALLELE_CT", cols.get("NALLELE_CT"))
         ac_mm = [int(ac.min()), int(ac.max())] if ac is not None and len(ac) else None
         parity.update({
-            "recipe": ("plink2 --vcf <ref-vcf> --set-all-var-ids @:# --rm-dup exclude-all "
+            "recipe": ("plink2 --vcf <ref-vcf> --snps-only just-acgt --set-all-var-ids @:# "
+                       "--rm-dup exclude-all "
                        "--import-max-alleles 2 --keep <cohort> --score <score-input> 1 2 3 "
                        "header cols=+scoresums,+denom no-mean-imputation list-variants"),
             "n_reference_used": n_processed,
@@ -2086,14 +2088,16 @@ def main():
             parity["label"] = "same-resolved-set"
             parity["statement"] = (
                 "Reference individuals were scored from the patient's own score input, "
-                "by the recipe score_plink2.py scored the patient with and the same plink2 "
-                "build, and every one of its %d variants was used for the patient and for "
-                "every cohort member." % n_given)
+                "by the recipe score_plink2.py scored the patient with plus --snps-only "
+                "just-acgt (so a panel indel cannot remove the SNV at its position) and the "
+                "same plink2 build, and every one of its %d variants was used for the patient "
+                "and for every cohort member." % n_given)
         else:
             parity["label"] = "other"
             parity["statement"] = (
                 "Not the same resolved set: %s. The cohort was scored from the patient's "
-                "own score input by the patient's recipe; the counts are in this block."
+                "own score input by the patient's recipe plus --snps-only just-acgt; the "
+                "counts are in this block."
                 % "; ".join(failed))
 
         print("  PARITY (the patient's score input vs what plink2 used for the cohort)")
