@@ -43,6 +43,12 @@ def main():
     prov = lib_run.read_json(args.provenance)
     dl = lib_run.read_json(args.model_download)
     rest = dl.get("rest_record", {})
+    # The file the raw score was computed from, as score_plink2.py recorded it. The provider
+    # scores the reference cohort from this same file, so it travels with its hash and with
+    # plink's own counts for the patient -- the parity claim is checked against these.
+    score_input = score.get("score_input")
+    score_input_sha256 = (lib_run.sha256_file(score_input)
+                          if score_input and os.path.exists(score_input) else None)
 
     request = {
         "generated_utc": lib_run.utcnow(),
@@ -74,6 +80,9 @@ def main():
             },
             "resolved_positions_manifest": os.path.join(
                 os.path.dirname(args.coverage).replace("select", "score"), "dosages.tsv"),
+            "score_input": score_input,
+            "score_input_sha256": score_input_sha256,
+            "n_variants_in_score_input": score.get("n_variants_in_score_input"),
             "resolved_weight_fraction": cov.get("resolved_weight_fraction"),
             "n_variants_in_score": score.get("n_variants_used_by_plink"),
             "r2_bar_used": cov.get("r2_bar"),
@@ -82,7 +91,7 @@ def main():
             "usable + reason (INT-2)", "source", "version_string (DATA-6/R6)",
             "ancestry_grouping_definition (INT-5)", "cohort_construction_rule (§17.2 fork)",
             "n_participants", "too_few_threshold_used", "assay_layer (INT-4)",
-            "scoring_parity (R1)", "distribution",
+            "scoring_parity (R1)", "distribution, with raw_scores",
         ],
     }
     lib_run.emit(request, args.out)
