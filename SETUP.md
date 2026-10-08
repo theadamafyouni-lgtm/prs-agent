@@ -267,9 +267,10 @@ python3 fetch_refdata.py --verify        # reads every byte; expect 0 problems
 #    archives, fasta/ and its indexes, hgdp_1kgp.panel, the phase3 .done markers, the
 #    PCA basis hgdp_basis/, panel/sites_index (which needs panel_index.py from the
 #    private repo, restored in section 6), and panel-snv/, the phase3 panel filtered to
-#    biallelic SNVs over all 2,504 samples that the score stage imputes against (16 GB;
-#    about 1 h on 8 cores, 6 h of CPU). About 42 GB free beyond the downloads, and
-#    1.5-2 h. It never overwrites anything.
+#    biallelic SNVs over all 2,504 samples that the score stage imputes against (16 GB,
+#    about 6 h of CPU, built one chromosome at a time; reproduced bit for bit only by
+#    bcftools/htslib 1.19, i.e. Ubuntu 24.04, and that was checked on chr22 only). About
+#    42 GB free beyond the downloads, and several hours. It never overwrites anything.
 python3 build_refdata.py --plan
 python3 build_refdata.py
 

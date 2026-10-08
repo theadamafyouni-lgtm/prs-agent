@@ -58,10 +58,12 @@ THE STEPS, IN ORDER
                   reference agent/tools/impute_joint.py --panel-dir reads, dropping each run's
                   hold-out at read time. `bcftools view --no-version -m2 -M2 -v snps |
                   bcftools norm --no-version -d exact -Oz1`, then `bcftools index -t`.
-                  bcftools/htslib 1.19 reproduces the working box's files bit for bit (checked
-                  on chr22); another version may compress differently and is reported BAD
-                  without being a different panel. About 3.5 h of CPU, 16 GB, one process per
-                  chromosome.
+                  bcftools/htslib 1.19 (Ubuntu 24.04) reproduces the working box's files bit
+                  for bit (checked on chr22). Another version may compress differently: the
+                  step then STOPS on the first chromosome, leaving its .part files named, and
+                  that is a different compression, not necessarily a different panel. About
+                  6 h of CPU and 16 GB, one chromosome at a time, so several hours of wall
+                  clock.
   liftover        bin/liftOver is checked, never built. setup.sh downloads UCSC's current
                   build, and the working box's copy matches no public build found, so any
                   other copy reports NOT-REPRODUCED.
@@ -781,7 +783,7 @@ def step_hgdp_basis(rd, mode):
     cmd = [sys.executable, ANCESTRY_PY, "build-ref",
            "--ref-pfile", rd.p("refdata/ancestry-ref/hgdp_1kgp/" + HGDP_STEM),
            "--panel", rd.p("refdata/ancestry-ref/hgdp_1kgp.panel")] + BASIS_ARGS + \
-          ["--out-dir", stage]
+          ["--out-dir", stage, "--keep-intermediates"]  # BASIS_EXACT checks ref_raw/ref_nonpal
     print("  " + " ".join(cmd))
     print("  (about 10 minutes on 8 CPUs)")
     try:
@@ -873,34 +875,41 @@ def step_panel_snv(rd, mode):
         if mode == "plan":
             rows.append(("present" if os.path.exists(dst) else "planned", rel))
             continue
+        refuse_stale(dst + ".part", tbi + ".part")  # named before anything is read
         have = [(state(dst, vsha, vsize), rel), (state(tbi, tsha, tsize), rel + ".tbi")]
         if mode == "check" or all(st == "ok" for st, _ in have) or any(
                 st == "BAD" for st, _ in have):
             rows.extend(have)
             continue
         if os.path.exists(dst) or os.path.exists(tbi):
-            rows.extend(have)  # one of the pair without the other: reported, not rebuilt
+            # One of the pair without the other: reported, not rebuilt. Move the one that is
+            # here aside and rerun to build both.
+            rows.extend(have)
             continue
         src = rd.entry("phase3_chr%d" % n)
         if state(rd.p(src["path"]), src["sha256"], src["bytes"]) != "ok":
             rows.append(("missing", rel + "  (not built: %s missing or wrong; "
                          "fetch_refdata.py --verify)" % short(src["path"])))
             continue
-        refuse_stale(dst + ".part", tbi + ".part")
         need_tools("bcftools")
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         print("  chr%d: bcftools view -m2 -M2 -v snps | norm -d exact  (minutes to half an hour)" % n)
+        view = norm = None
         try:
             view = subprocess.Popen(["bcftools", "view", "--no-version", "-m2", "-M2", "-v",
                                      "snps", rd.p(src["path"]), "-Ou"], stdout=subprocess.PIPE)
-            subprocess.run(["bcftools", "norm", "--no-version", "-d", "exact", "-Oz1",
-                            "-o", dst + ".part"], stdin=view.stdout, check=True)
-            view.stdout.close()
-            if view.wait() != 0:
-                raise Stop("chr%d: bcftools view failed" % n)
+            norm = subprocess.Popen(["bcftools", "norm", "--no-version", "-d", "exact", "-Oz1",
+                                     "-o", dst + ".part"], stdin=view.stdout)
+            view.stdout.close()  # so view sees SIGPIPE, not a blocked write, if norm dies
+            if norm.wait() != 0 or view.wait() != 0:
+                raise Stop("chr%d: bcftools view | norm failed" % n)
             subprocess.run(["bcftools", "index", "-t", "-o", tbi + ".part", dst + ".part"],
                            check=True)
         except BaseException:
+            for proc in (view, norm):
+                if proc is not None and proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
             for p in (dst + ".part", tbi + ".part"):
                 if os.path.exists(p):
                     os.unlink(p)
