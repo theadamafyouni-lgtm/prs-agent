@@ -46,9 +46,24 @@ def main():
     # The file the raw score was computed from, as score_plink2.py recorded it. The provider
     # scores the reference cohort from this same file, so it travels with its hash and with
     # plink's own counts for the patient -- the parity claim is checked against these.
+    # The hash is the one score_plink2.py took when it scored, not one taken now: the file
+    # at that path may have been rebuilt since, and the request would then carry a hash of
+    # bytes the raw score never came from.
     score_input = score.get("score_input")
-    score_input_sha256 = (lib_run.sha256_file(score_input)
-                          if score_input and os.path.exists(score_input) else None)
+    score_input_sha256 = score.get("score_input_sha256")
+    if score_input and not score_input_sha256:
+        raise SystemExit(
+            f"interpret_request.py: {args.score} records no score_input_sha256, so which "
+            f"bytes the raw score came from is not recorded. Re-run tools/score_plink2.py, "
+            f"which records it, and build the request from its raw_score.json.")
+    if score_input and os.path.exists(score_input):
+        now = lib_run.sha256_file(score_input)
+        if now != score_input_sha256:
+            raise SystemExit(
+                f"interpret_request.py: {score_input} has changed since the raw score was "
+                f"computed from it (sha256 then {score_input_sha256}, now {now}). The "
+                f"reference would be scored from a different file than the patient was. "
+                f"Re-run tools/score_plink2.py on the current file, then build the request.")
 
     request = {
         "generated_utc": lib_run.utcnow(),
@@ -85,6 +100,9 @@ def main():
             "n_variants_in_score_input": score.get("n_variants_in_score_input"),
             "resolved_weight_fraction": cov.get("resolved_weight_fraction"),
             "n_variants_in_score": score.get("n_variants_used_by_plink"),
+            # Which plink2 build scored the patient, so the provider can say whether the
+            # cohort was scored by the same one.
+            "plink2_version": score.get("plink2_version"),
             "r2_bar_used": cov.get("r2_bar"),
         },
         "what_the_provider_must_return": [

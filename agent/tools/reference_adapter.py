@@ -13,9 +13,11 @@ Contract: interfaces/reference-distribution.md
 Exit codes:
   0  reference present and valid; `placement` carries the counts
   3  reference_unavailable  -- no artifact supplied or file missing
-  4  reference_invalid      -- artifact present but fails the contract, or is for a different
-                               model or score input than the request; also request_missing /
-                               request_invalid when the request itself cannot be checked against
+  4  reference_invalid      -- artifact present but fails the contract, contradicts itself, is
+                               for a different model or score input than the request, or holds
+                               raw scores with missing genotypes scored as zero dosage; also
+                               request_missing / request_invalid when the request itself cannot
+                               be checked against
   5  reference_unusable     -- provider itself reports usable=false (INT-2 refusal, a CORRECT outcome)
 
 On a valid reference it also COUNTS: how many reference raw scores fall below, equal to and above
@@ -160,22 +162,92 @@ def main():
                 f"distribution.raw_scores must be a list of {n} finite numbers, one per "
                 f"reference participant")
     ids = dist.get("raw_score_sample_ids")
-    if ids is not None and (not isinstance(ids, list) or len(ids) != n):
+    if (not isinstance(ids, list) or len(ids) != n
+            or not all(isinstance(s_, str) and s_ for s_ in ids) or len(set(ids)) != n):
         blocked(args.run, args.out, 4, "reference_invalid",
-                f"distribution.raw_score_sample_ids must list {n} ids, one per raw score")
+                f"distribution.raw_score_sample_ids must name {n} distinct reference "
+                f"participants, one per raw score")
+    if ref.get("n_participants") != n:
+        blocked(args.run, args.out, 4, "reference_invalid",
+                f"n_participants is {ref.get('n_participants')!r} but the distribution has "
+                f"{n} raw scores")
+    # The summary must describe these scores. Each quantile is checked against the order
+    # statistics that bracket it under every standard quantile definition (Hyndman & Fan
+    # types 1-9): for p = q/100 it lies between the ceil(pn)-1 th and the floor(pn)+2 th
+    # smallest score. No definition is chosen, so none is imposed on the provider. The
+    # tolerance is floating-point rounding in an interpolation, nothing more.
+    srt = sorted(raw)
+
+    def within(v, lo, hi):
+        return (lo <= v <= hi or math.isclose(v, lo, rel_tol=1e-9, abs_tol=1e-12)
+                or math.isclose(v, hi, rel_tol=1e-9, abs_tol=1e-12))
+
+    for qname in REQUIRED_QUANTILES:
+        pct = int(qname[1:])
+        lo = max(0, -(-pct * n // 100) - 2)
+        hi = min(n - 1, pct * n // 100 + 1)
+        if not within(dist[qname], srt[lo], srt[hi]):
+            blocked(args.run, args.out, 4, "reference_invalid",
+                    f"distribution.{qname} is {dist[qname]!r}, outside [{srt[lo]!r}, "
+                    f"{srt[hi]!r}], where any quantile definition puts it for these raw "
+                    f"scores; the summary does not describe the scores it ships with")
+    for key, val in (("min", srt[0]), ("max", srt[-1])):
+        if dist.get(key) is not None and dist[key] != val:
+            blocked(args.run, args.out, 4, "reference_invalid",
+                    f"distribution.{key} is {dist[key]!r} but the raw scores' {key} is {val!r}")
     if ref.get("scoring_parity") not in PARITY:
         blocked(args.run, args.out, 4, "reference_invalid",
                 f"scoring_parity must be one of {sorted(PARITY)}; got {ref.get('scoring_parity')!r}")
     patient = request.get("patient") or {}
+    detail = ref.get("scoring_parity_detail")
+    detail = detail if isinstance(detail, dict) else {}
+    want_sha = patient.get("score_input_sha256")
+    got_sha = detail.get("score_input_sha256")
+    # Whatever the label: a cohort the artifact says was scored from a score input other
+    # than the request's is a reference for some other score, as a different model file is.
+    if got_sha is not None and got_sha != want_sha:
+        blocked(args.run, args.out, 4, "reference_invalid",
+                f"the artifact says the cohort was scored from a score input with sha256 "
+                f"{got_sha!r}; the request's is {want_sha!r}. A reference scored from a "
+                f"different file is not a reference for this score")
+    # With no-mean-imputation a missing genotype call is scored as zero dosage. A cohort
+    # member with fewer than two alleles counted at every variant plink2 used therefore has
+    # a raw score with filled values in it -- absence scored as a genotype -- whatever the
+    # label says.
+    ac = detail.get("reference_allele_ct_min_max")
+    used_ref = detail.get("n_variants_plink2_used_for_reference")
+    if (isinstance(ac, list) and len(ac) == 2 and isinstance(used_ref, int)
+            and not isinstance(used_ref, bool) and ac != [2 * used_ref, 2 * used_ref]):
+        blocked(args.run, args.out, 4, "reference_invalid",
+                f"reference ALLELE_CT runs {ac[0]} to {ac[1]} where {2 * used_ref} means every "
+                f"call present at the {used_ref} variants plink2 used: some cohort genotypes "
+                f"were missing and were scored as zero dosage, so those raw scores contain "
+                f"filled values")
     if ref.get("scoring_parity") == "same-resolved-set":
-        # The claim is that the cohort was scored from the patient's own score input. The hash
-        # is how that is checked rather than taken.
-        got_sha = (ref.get("scoring_parity_detail") or {}).get("score_input_sha256")
-        if not patient.get("score_input_sha256") or got_sha != patient.get("score_input_sha256"):
+        # The claim is that the cohort was scored from the patient's own score input and that
+        # plink2 used every one of its variants on both sides. The hash and the counts are
+        # how that is checked rather than taken.
+        if not want_sha or got_sha != want_sha:
             blocked(args.run, args.out, 4, "reference_invalid",
                     f"scoring_parity is same-resolved-set but the artifact's score input "
-                    f"sha256 is {got_sha!r} and the request's is "
-                    f"{patient.get('score_input_sha256')!r}")
+                    f"sha256 is {got_sha!r} and the request's is {want_sha!r}")
+        n_in = patient.get("n_variants_in_score_input")
+        counts = {
+            "request patient.n_variants_in_score (used for the patient)":
+                patient.get("n_variants_in_score"),
+            "scoring_parity_detail.n_variants_in_score_input":
+                detail.get("n_variants_in_score_input"),
+            "scoring_parity_detail.n_variants_plink2_used_for_reference": used_ref,
+        }
+        bad = {k: v for k, v in counts.items() if v != n_in}
+        not_scored = detail.get("n_score_input_variants_not_scored_in_reference")
+        if (not isinstance(n_in, int) or isinstance(n_in, bool) or n_in < 1 or bad
+                or not_scored != 0):
+            blocked(args.run, args.out, 4, "reference_invalid",
+                    f"scoring_parity is same-resolved-set, which needs every count to equal "
+                    f"the request's n_variants_in_score_input ({n_in!r}) and no score-input "
+                    f"variant left unscored in the reference; got {bad or 'equal counts'} and "
+                    f"n_score_input_variants_not_scored_in_reference={not_scored!r}")
 
     x = patient.get("raw_score")
     if not _finite(x):
@@ -188,36 +260,49 @@ def main():
         "n_equal": sum(1 for v in raw if v == x),
         "n_above": sum(1 for v in raw if v > x),
         "compared_against": "reference.distribution.raw_scores",
-        "note": "Counts only, by exact comparison. No percentile is computed here: turning these "
-                "counts into one takes a convention for ties and for the patient's own "
-                "position, and that is the agent's to choose and to state. Both sides are "
-                "plink2 SCORE1_SUM values at the precision plink2 prints them.",
+        "note": "Counts only, by exact comparison of the two numbers as given. No percentile "
+                "is computed here: turning these counts into one takes a convention for ties "
+                "and for the patient's own position, and that is the agent's to choose and to "
+                "state. The comparison is exact; the inputs are rounded. The patient's "
+                "raw_score is what the request carries (score_plink2.py sums plink2's "
+                "per-chromosome SCORE1_SUM values, each as plink2 printed it), and each "
+                "reference value is what the artifact carries (build_reference.py copies "
+                "plink2's per-sample SCORE1_SUM as printed). The two sides are rounded "
+                "differently, so a reference score within that rounding of the patient's "
+                "could fall on either side of it, and scores counted in n_equal may differ "
+                "beyond that precision.",
     }
 
     warnings = []
-    # assay_layer may be a bare string or the object form the provider uses. Compare like with
-    # like: the provider's own assay_matched flag when it declares one, else the layer descriptor
-    # against the patient's assay class. Never compare an object to a string -- that is always
-    # unequal, so the warning fired unconditionally and put a raw dict into report-facing prose.
+    # assay_layer may be a bare string or the object form the provider uses. Whether the
+    # reference's assay layer is the patient's is a judgment, and only the provider's own
+    # stated assay_matched is taken as one. Two strings that differ are not evidence of
+    # different layers ("genotyping array" and "genotyping-array"), and two that are equal
+    # are not proof of the same one, so this tool never compares them.
     layer = ref.get("assay_layer")
-    patient_assay = request.get("patient", {}).get("assay_class")
+    patient_assay = (request.get("patient") or {}).get("assay_class")
     if isinstance(layer, dict):
         layer_desc = layer.get("reference") or "unstated"
         matched = layer.get("assay_matched")
-        assay_mismatch = not matched if isinstance(matched, bool) else layer_desc != patient_assay
     else:
-        layer_desc = layer
-        assay_mismatch = layer != patient_assay
-    if assay_mismatch:
+        layer_desc, matched = layer, None
+    if matched is False:
         warnings.append(
-            f"INT-4: the reference assay layer ({layer_desc}) does not match the patient's "
-            f"assay class {patient_assay!r}. The R1 "
-            f"imputed/partial-vs-complete bias is baked into any percentile from this pairing and "
+            f"INT-4: the provider states the reference assay layer ({layer_desc}) does not "
+            f"match the patient's assay class {patient_assay!r}. The R1 "
+            f"imputed/partial-vs-complete bias is baked into any placement from this pairing "
+            f"and the report must say so.")
+    elif matched is not True:
+        warnings.append(
+            f"INT-4: the reference assay layer is stated as {layer_desc!r} and the patient's "
+            f"assay class is {patient_assay!r}. The provider does not state whether they are "
+            f"the same layer, and this tool does not judge it from the wording. If they are "
+            f"not, the R1 imputed/partial-vs-complete bias is baked into the placement and "
             f"the report must say so.")
     if ref.get("scoring_parity") == "other":
         warnings.append(
             "scoring_parity is other: the provider states "
-            f"{(ref.get('scoring_parity_detail') or {}).get('statement')!r}. The reference "
+            f"{detail.get('statement')!r}. The reference "
             "and the patient were not scored over the same variant set; the report must say "
             "so.")
     if ref.get("scoring_parity") == "full-model-set":

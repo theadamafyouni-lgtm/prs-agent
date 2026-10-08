@@ -37,6 +37,7 @@ it used.
     "score_input_sha256": "...of that file...",
     "n_variants_in_score_input": 0,
     "n_variants_in_score": 0,
+    "plink2_version": "...the first line plink2 --version printed when the patient was scored...",
     "resolved_weight_fraction": 0.0
   }
 }
@@ -47,9 +48,11 @@ it used.
 
 `score_input` is the file the patient's raw score was computed from (`ID EA BETA`: `chrom:pos`,
 the allele actually used after any strand flip, the weight), as `score_plink2.py` recorded it,
-with its sha256. `n_variants_in_score_input` and `n_variants_in_score` are plink's own counts
-for the patient: variants handed to it and variants it used. The provider scores the cohort
-from this same file, which is what `scoring_parity` is checked against.
+with the sha256 `score_plink2.py` took when it scored (not a later hash of the path).
+`n_variants_in_score_input` and `n_variants_in_score` are plink's own counts for the patient:
+variants handed to it and variants it used; `plink2_version` is the build that scored the
+patient. The provider scores the cohort from this same file, which is what `scoring_parity`
+is checked against.
 
 Every file path in the request must resolve, links included, inside the requesting run's own
 `runs/<run>/` directory. The harness refuses a request that names anything else rather than
@@ -69,9 +72,9 @@ Every field is required. A response missing any of them is not usable and `inter
 | `cohort_construction_rule` | `INT-5`/§17.2 fork: a discrete label or a distance cutoff. A cohort is a set, but the math treats ancestry as continuous — whoever builds this **picks a rule for the slice and flags it**; the spec fork stays open. |
 | `n_participants` | `INT-2`'s "too few" is judged against this. |
 | `too_few_threshold_used` | the value the provider applied, since the spec leaves it open. |
-| `assay_layer` | `INT-4`: an array-derived score must be placed against an **array-derived** reference, or the imputed/partial-vs-complete bias (`R1`) is baked into the percentile. |
+| `assay_layer` | `INT-4`: an array-derived score must be placed against an **array-derived** reference, or the imputed/partial-vs-complete bias (`R1`) is baked into the percentile. In object form, `assay_matched` is `true`/`false` only as the provider's own statement, else `null`; no tool decides it by comparing the wording of the two descriptions. |
 | `scoring_parity` | how reference scores were computed: same model file, and **whether they used the same resolved variant set as the patient**. See below. |
-| `distribution` | the quantiles `p01,p05,p10,p25,p50,p75,p90,p95,p99` (finite, non-decreasing), `mean`, `sd`, `n` (a positive integer), and **`raw_scores`: every participant's raw score, `n` of them**, with `raw_score_sample_ids` naming each one at the same index. The patient is placed by counting against `raw_scores`; nine quantiles would leave interpolation, which is an approximate percentile. On a refusal every value is null. |
+| `distribution` | the quantiles `p01,p05,p10,p25,p50,p75,p90,p95,p99` (finite, non-decreasing, and each between the order statistics of `raw_scores` that bracket it under any standard quantile definition), `mean`, `sd`, `min`/`max` (equal to those of `raw_scores` when given), `n` (a positive integer, equal to `n_participants`), and **`raw_scores`: every participant's raw score, `n` of them**, with `raw_score_sample_ids` naming each one, `n` distinct ids at the same index. The patient is placed by counting against `raw_scores`; nine quantiles would leave interpolation, which is an approximate percentile. On a refusal every value is null. |
 
 ### `scoring_parity` is the one most likely to be got wrong
 
@@ -81,15 +84,24 @@ consumer case — a few-hundred-thousand-marker array placed against a WGS-scale
 far end of that bias. So the provider must declare one of:
 
 - `same-resolved-set` — reference individuals scored from the patient's own `score_input` by the
-  patient's plink2 recipe, and plink used every one of its variants for the patient and for every
-  reference participant. Removes the bias by construction. Preferred. Claimed only when
-  `scoring_parity_detail.score_input_sha256` equals the request's `score_input_sha256` and the
-  counts in `scoring_parity_detail` agree; the adapter refuses the claim otherwise.
+  patient's plink2 recipe and plink2 build, and plink used every one of its variants for the
+  patient and for every reference participant. Removes the bias by construction. Preferred.
+  Claimed only when `scoring_parity_detail.score_input_sha256` equals the request's
+  `score_input_sha256`, `scoring_parity_detail.n_variants_in_score_input` and
+  `n_variants_plink2_used_for_reference` and the request's `n_variants_in_score` all equal the
+  request's `n_variants_in_score_input`, and
+  `n_score_input_variants_not_scored_in_reference` is 0; the adapter refuses the claim otherwise.
 - `full-model-set` — reference scored over all model positions. **Then the percentile carries the
   R1 bias and the report must say so**, quantified if possible.
 - `other` — described, in `scoring_parity_detail.statement`, with the counts: for example the
   reference scored from the patient's score input but plink used fewer of its variants there
   than for the patient. The percentile carries a bias of the same kind and the report says so.
+
+Whatever the label, two things make the artifact invalid rather than biased, and the adapter
+refuses it: a `scoring_parity_detail.score_input_sha256` that is not the request's (the cohort
+was scored from some other file), and a `reference_allele_ct_min_max` other than twice
+`n_variants_plink2_used_for_reference` at both ends (some cohort genotypes were missing, and
+`no-mean-imputation` scored them as zero dosage — absence filled in as a genotype).
 
 `pgsc_calc`'s built-in adjustment is explicitly **not** the answer here, since it is not this
 product's scoring tool.
@@ -143,6 +155,9 @@ above it exits 4, `reference_invalid`. A provider refusal exits 5, `reference_un
 case `interpret` records a **blocked** state or the refusal; it does not fall back to anything.
 
 On exit 0 the response carries `placement`: `n`, and how many of the `n` raw scores are below,
-equal to and above the patient's raw score. Counts, by exact comparison, and nothing else. Turning
-them into a percentile takes a convention for ties and for the patient's own position; that is
-the agent's to choose and to state, so the adapter does not.
+equal to and above the patient's raw score. Counts, by exact comparison of the numbers as given,
+and nothing else. Both sides are rounded — plink2 prints scores to a fixed precision, and the
+patient's raw score is a sum of per-chromosome printed values — so a reference score within
+that rounding of the patient's could fall on either side. Turning the counts into a percentile
+takes a convention for ties and for the patient's own position; that is the agent's to choose
+and to state, so the adapter does not.
