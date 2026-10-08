@@ -535,11 +535,12 @@ class ProviderHandoff:
                   "that basis's own sample-to-population labels, the ones ancestry.py "
                   "counted the projection's recorded neighbours with", self.prs_real)
 
-        # The model-specific reference VCF. Present for exactly one model. It comes from the
-        # harness's own tree, not from anything the agent wrote.
-        native = os.path.join(config.PROVIDER_SRC, "inputs",
-                              PROVIDER_INPUTS["ref_vcf"].format(pgs=PROVIDER_NATIVE_PGS))
-        self._try(want["ref_vcf"], native if self.pgs == PROVIDER_NATIVE_PGS else None,
+        # The model-specific reference VCF is never pre-staged: the provider builds it from
+        # phase3 with build_reference_panel.py, for every model. The hand-built panel under
+        # reference-provider/inputs/ for PGS005168 (2026-07-28) lacks 12,943 of the variants a
+        # real patient's score input carried on 2026-10-08, and staging it contradicted the
+        # rule above that panels are rebuilt per run, never cached.
+        self._try(want["ref_vcf"], None,
                   "1000 Genomes genotypes at this model's positions", None)
 
         self._write_inputs_readme(want)
@@ -772,29 +773,26 @@ class ProviderHandoff:
     # -- reporting -------------------------------------------------------
     def summary(self):
         """What the harness knows about the fit. Recorded; never shown to the provider."""
-        matched = self.pgs == PROVIDER_NATIVE_PGS
+        # No reference panel is pre-staged for any model any more (see the staging code), so
+        # nothing "came for free"; the provider builds every panel from phase3.
+        matched = False
         return {
             "requested_pgs_id": self.pgs,
             "provider_native_pgs_id": PROVIDER_NATIVE_PGS,
             "inputs_match_requested_model": matched,
             "staged": self.staged,
             "absent": self.absent,
-            "int1_arm_exercised": matched and not self.ambiguous and not self.refused,
+            "staging_ok": not self.ambiguous and not self.refused,
             "ambiguous_input": self.ambiguous,
             "refused_path": self.refused,
             "pca_basis": self.basis,
             "panel_buildable": self.panel_buildable,
             "note": (
-                "The pre-staged reference VCF and two input basenames are specific to %s. "
-                "When the request names that model the panel is staged and the reference is "
-                "built directly. When it names another, the panel is absent -- but since "
-                "2026-08-05 build_reference_panel.py and phase3/ are provided, so the "
-                "provider CAN build one rather than being forced to refuse. Which it does "
-                "is its own call; the harness does not write the refusal on its behalf and "
-                "does not build the panel on its behalf either. "
-                "`inputs_match_requested_model` therefore no longer means 'the only case "
-                "that can work' -- it means the panel came for free rather than being built."
-                % PROVIDER_NATIVE_PGS),
+                "No reference panel is pre-staged for any model, %s included: the hand-built "
+                "one was incomplete for a real patient's score input. build_reference_panel.py "
+                "and phase3/ are provided and the provider builds the panel per request; "
+                "whether to, or to refuse, is its own call. The harness neither writes the "
+                "refusal nor builds the panel on its behalf." % PROVIDER_NATIVE_PGS),
         }
 
     def brief(self):
