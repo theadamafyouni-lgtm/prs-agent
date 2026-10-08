@@ -61,11 +61,14 @@ positions as failures. Measured on this build: solo imputation put ~68% of posit
 Three steps.
 
 **(a) The positions their file actually types.** The hold-out cohort is masked to these, so the
-cohort is genotyped as if on the same chip rather than carrying full sequence.
+cohort is genotyped as if on the same chip rather than carrying full sequence. **Called
+positions only**: a no-call is kept in the normalized VCF as a missing genotype, and if the
+hold-outs kept their genotypes there, the DR2 at that site would measure a cohort that was
+genotyped where this person was not, and overstate how well their value was recovered.
 
 ```bash
 mkdir -p runs/<RUN_ID>/score
-bcftools query -f '%CHROM\t%POS\n' runs/<RUN_ID>/door/normalized.vcf.gz \
+bcftools query -i 'GT!="mis"' -f '%CHROM\t%POS\n' runs/<RUN_ID>/door/normalized.vcf.gz \
   > runs/<RUN_ID>/score/patient_typed_positions.tsv
 ```
 
@@ -158,8 +161,10 @@ reads, and the multi-sample cohort output into `--out-dir/cohort/`.
 > file existing is not by itself success.
 >
 > Keep polling. A run of polls of nine minutes each is the expected shape of this stage, not a
-> sign something is wrong. If the count stops advancing for several
-> polls, read the newest `chr<N>.beagle.log` in that directory before concluding anything.
+> sign something is wrong. The largest chromosomes run first, so the count normally stays at 0
+> for the first forty minutes or so. To tell slow from dead, check the process, not the
+> count: `pgrep -f impute_joint.py` and the tail of `runs/<RUN_ID>/score/impute_joint.log`.
+> `chr<N>.beagle.log` is written only when that chromosome's Beagle finishes.
 >
 > **Every poll must return. Never block waiting for a file without a bound.** A command like
 > `until [ -f .../chr4.vcf.gz ]; do sleep 900; done` with no `timeout` in front looks strictly
