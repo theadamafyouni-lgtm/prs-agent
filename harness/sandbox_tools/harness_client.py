@@ -39,9 +39,11 @@ Exit codes:
      is on stdout
   2  the person ended the session
   3  no usable reference could be built, or none was supplied
-  4  nobody replied within the time allowed (the blocking forms)
+  4  nobody replied within the time allowed (the blocking forms). For request-reference the
+     request id is printed; collect the reply with await-reference --id <it>
   5  the message was malformed and was not sent, no such request was sent from here, or the
-     harness replied with something other than an answer -- the reply is printed
+     harness replied with something other than an answer -- the reply is printed. A
+     request-reference refused as busy also prints the id of the one already being built
   6  await-reference only: the provider has not replied yet; run it again
 """
 import argparse
@@ -167,8 +169,11 @@ def _reference_reply(reply):
         return 3
     if status in ("error", "busy"):
         # The harness did not hand the request over: a path outside the run, an ambiguous
-        # input, or a request already being built. Not a reference outcome; say why.
+        # input, or a request already being built -- whose id a busy reply names, so it can
+        # still be collected. Not a reference outcome; say why.
         print("[the harness did not hand the request over] " + (reply.get("reason") or ""))
+        if status == "busy" and reply.get("in_flight"):
+            print("[request already being built] %s" % reply["in_flight"])
         return 5
     sys.stderr.write("unexpected reply status %r\n" % status)
     print(json.dumps(reply))
@@ -199,10 +204,14 @@ def cmd_request_reference(args):
         print(mid)
         return 0
 
+    # The blocking form can be cut off by whatever runs it. The id is the only handle on the
+    # request once that happens, so it is said first.
+    sys.stderr.write("request id %s\n" % mid)
     reply = _await(mid, args.timeout)
     if reply is None:
-        sys.stderr.write("no reply within %ds.\n" % args.timeout)
-        print("[no reference was delivered]")
+        sys.stderr.write("no reply within %ds. The request is still with the harness; "
+                         "collect it with: await-reference --id %s\n" % (args.timeout, mid))
+        print("[no reference was delivered yet] %s" % mid)
         return 4
     return _reference_reply(reply)
 
