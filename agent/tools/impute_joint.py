@@ -34,7 +34,9 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import lib_run  # noqa: E402
@@ -113,12 +115,14 @@ class Failed(Exception):
 
 
 # Wall-clock per step for the chromosome in progress, so Beagle and the bcftools steps
-# around it can be told apart in impute_joint.json rather than guessed at.
-STEP_SECONDS = {}
+# around it can be told apart in impute_joint.json rather than guessed at. Per thread, because
+# with --parallel-chromosomes several chromosomes are in progress at once.
+_TLS = threading.local()
 
 
 def timed(step, t0):
-    STEP_SECONDS[step] = round(STEP_SECONDS.get(step, 0) + time.time() - t0, 2)
+    steps = _TLS.__dict__.setdefault("steps", {})
+    steps[step] = round(steps.get(step, 0) + time.time() - t0, 2)
 
 
 # Hold-outs enter the Beagle target under this prefix so that excludesamples=, which Beagle
@@ -241,11 +245,21 @@ def main():
     ap.add_argument("--seed", required=True, help="fixed and recorded -- SCO-10")
     ap.add_argument("--threads", default="4")
     ap.add_argument("--xmx", default="8g")
+    ap.add_argument("--java-opt", action="append", default=[],
+                    help="extra JVM option for Beagle, repeatable (e.g. -XX:+UseParallelGC). JVM "
+                         "settings change speed, not results; Beagle's own parameters are not "
+                         "exposed here")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--work-dir", default=None, help="default <out-dir>/work")
     ap.add_argument("--keep-work", action="store_true", help="keep per-chromosome intermediates")
     ap.add_argument("--skip-existing", action="store_true")
+    ap.add_argument("--parallel-chromosomes", type=int, default=1,
+                    help="chromosomes in flight at once, each its own Beagle with --threads and "
+                         "--xmx; largest first. Beagle's output depends on its nthreads, so keep "
+                         "--threads fixed and change this instead")
     args = ap.parse_args()
+    if args.parallel_chromosomes < 1:
+        die("--parallel-chromosomes must be at least 1")
 
     work_root = args.work_dir or os.path.join(args.out_dir, "work")
 
@@ -290,8 +304,7 @@ def main():
     version_text = (beagle_probe.stdout + beagle_probe.stderr).strip()
     version_line = version_text.splitlines()[0] if version_text else None
 
-    runs = []
-    for c in parse_chroms(args.chromosomes):
+    def one(c):
         src = os.path.join(args.phase3_dir, f"chr{c}.vcf.gz")
         gmap = os.path.join(args.map_dir, f"plink.chr{c}.GRCh37.map")
         patient_out = os.path.join(args.out_dir, f"chr{c}.vcf.gz")
@@ -300,22 +313,18 @@ def main():
         work = os.path.join(work_root, f"chr{c}")
 
         if not (os.path.exists(src) and os.path.exists(src + ".tbi")):
-            runs.append({"chrom": c, "status": "SKIPPED_no_source", "source": src})
             print(f"chr{c}: SKIPPED_no_source", file=sys.stderr)
-            continue
+            return {"chrom": c, "status": "SKIPPED_no_source", "source": src}
         if args.panel_dir and not os.path.exists(os.path.join(args.panel_dir, f"chr{c}.snv.vcf.gz")):
-            runs.append({"chrom": c, "status": "SKIPPED_no_panel", "source": src})
             print(f"chr{c}: SKIPPED_no_panel", file=sys.stderr)
-            continue
+            return {"chrom": c, "status": "SKIPPED_no_panel", "source": src}
         if not os.path.exists(gmap):
-            runs.append({"chrom": c, "status": "SKIPPED_no_genetic_map", "source": src, "map": gmap})
             print(f"chr{c}: SKIPPED_no_genetic_map", file=sys.stderr)
-            continue
+            return {"chrom": c, "status": "SKIPPED_no_genetic_map", "source": src, "map": gmap}
         if args.skip_existing and os.path.exists(patient_out):
-            runs.append({"chrom": c, "status": "SKIPPED_output_exists", "source": src,
-                         "map": gmap, "patient_output": patient_out})
             print(f"chr{c}: SKIPPED_output_exists", file=sys.stderr)
-            continue
+            return {"chrom": c, "status": "SKIPPED_output_exists", "source": src,
+                    "map": gmap, "patient_output": patient_out}
 
         entry = {"chrom": c, "source": src, "map": gmap,
                  "patient_output": patient_out, "cohort_output": cohort_stem + ".vcf.gz",
@@ -325,7 +334,7 @@ def main():
         hold_vcf = os.path.join(work, "hold.vcf.gz")
         merged_vcf = os.path.join(work, "merged.vcf.gz")
         t0 = time.time()
-        STEP_SECONDS.clear()
+        _TLS.steps = {}
         markers = None
         cohort_index = None
         try:
@@ -376,7 +385,7 @@ def main():
 
             # Beagle, run exactly as tools/impute.py runs it. chrom= confines the run to this
             # chromosome even though the patient VCF spans the genome.
-            cmd = [java, f"-Xmx{args.xmx}", "-jar", BEAGLE,
+            cmd = [java, f"-Xmx{args.xmx}", *args.java_opt, "-jar", BEAGLE,
                    f"gt={merged_vcf}", f"ref={ref_vcf}", f"map={gmap}",
                    f"out={cohort_stem}", f"chrom={c}", f"nthreads={args.threads}",
                    f"seed={args.seed}", "gp=true", "impute=true"]
@@ -449,12 +458,28 @@ def main():
             if cohort_index is not None and cohort_index.poll() is None:
                 cohort_index.wait()
         entry["seconds"] = round(time.time() - t0, 1)
-        entry["step_seconds"] = dict(STEP_SECONDS)
+        entry["step_seconds"] = dict(_TLS.steps)
         if not args.keep_work:
             shutil.rmtree(work, ignore_errors=True)
-        runs.append(entry)
         print(f"chr{c}: {entry['status']} ({entry['seconds']}s, "
               f"{markers if markers is not None else 'n/a'} markers)", file=sys.stderr)
+        return entry
+
+    chroms = parse_chroms(args.chromosomes)
+    t_all = time.time()
+    if args.parallel_chromosomes == 1:
+        runs = [one(c) for c in chroms]
+    else:
+        # Largest first, so the last chromosomes to start are the short ones and the pool does
+        # not end on one long straggler. Each worker runs one whole chromosome at a time.
+        def size(c):
+            path = os.path.join(args.phase3_dir, f"chr{c}.vcf.gz")
+            return os.path.getsize(path) if os.path.exists(path) else 0
+        order = sorted(chroms, key=size, reverse=True)
+        with ThreadPoolExecutor(max_workers=args.parallel_chromosomes) as pool:
+            done = dict(zip(order, pool.map(one, order)))
+        runs = [done[c] for c in chroms]
+    wall_seconds = round(time.time() - t_all, 1)
 
     result = {
         "tool": "impute_joint.py",
@@ -490,7 +515,10 @@ def main():
             "sample_lists_disjoint": True,
             "patient_in_neither_list": True,
         },
+        "wall_seconds_all_chromosomes": wall_seconds,
         "parameters": {"threads": args.threads, "xmx": args.xmx, "gp": True, "impute": True,
+                       "parallel_chromosomes": args.parallel_chromosomes,
+                       "java_opts": args.java_opt,
                        "keep_work": args.keep_work, "work_dir": work_root},
         "per_chromosome": runs,
         "n_ok": sum(1 for r in runs if r.get("status") == "ok"),
