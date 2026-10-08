@@ -516,12 +516,20 @@ def _live_run_processes(run_id):
         found.append({"pid": pid, "cmd": parts[1][:200]})
     return found
 
-def _chmod_tree(root, file_mode, dir_mode):
-    """chmod a tree WITHOUT following any symlink out of it.
+def _chmod_tree(root, file_mode, dir_mode, shared=None):
+    """chmod a tree WITHOUT following any symlink out of it, and without touching any file
+    whose inode it shares with somewhere else.
 
     os.walk puts a symlink-to-directory in `dirs`, and os.chmod follows symlinks by default.
     Chmod'ing the jail HOME's `Library/Keychains` link therefore changed the mode of the real
     ~/Library/Keychains. Every symlink is skipped and counted instead.
+
+    The same mistake through a different door: on Linux the refdata clone is `cp -al`, so
+    every file under <sandbox>/refdata IS the file in agent/refdata and in every other run's
+    clone. A mode is a property of the inode, so freezing one run to 0444 took the execute
+    bit off agent/refdata/bin/plink2 for every run after it -- run manifests from September
+    record `plink2: Permission denied`. A regular file with more than one link is
+    skipped and, when `shared` is a list, recorded in it.
     """
     n = 0
     skipped = []
@@ -530,6 +538,14 @@ def _chmod_tree(root, file_mode, dir_mode):
             p = os.path.join(cur, name)
             if os.path.islink(p):
                 skipped.append(os.path.relpath(p, root))
+                continue
+            try:
+                st = os.lstat(p)
+            except OSError:
+                continue
+            if not os.path.isdir(p) and st.st_nlink > 1:
+                if shared is not None:
+                    shared.append(os.path.relpath(p, root))
                 continue
             try:
                 os.chmod(p, dir_mode if os.path.isdir(p) else file_mode)
@@ -2381,10 +2397,13 @@ class Orchestrator:
                 "-- this run has no score. Check the score skill's polling section."
                 % ", ".join("pid %s" % p["pid"] for p in alive))
             return
-        n, skipped = _chmod_tree(self.sandbox_root, 0o444, 0o555)
+        shared = []
+        n, skipped = _chmod_tree(self.sandbox_root, 0o444, 0o555, shared=shared)
         self.manifest.set("sandbox_frozen", {
             "root": self.sandbox_root, "frozen": True,
             "files": n, "symlinks_skipped": skipped,
+            "hardlinked_files_left_alone": len(shared),
+            "hardlinked_files_sample": shared[:20],
             "note": ("Symlinks are never chmod'd. os.walk lists a symlink-to-directory among "
                      "its dirs and os.chmod follows symlinks, so this loop previously "
                      "changed the mode of the real ~/Library/Keychains through the jail "
