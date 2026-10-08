@@ -426,6 +426,14 @@ KEYCHAIN_DIR = os.path.expanduser("~/.claude")
 # Timings, measured. These size the transport rather than being guessed at.
 # ---------------------------------------------------------------------------
 
+# The model every spawned agent runs on when run_harness.py is not given --model. Pinned by
+# full id, never an alias: an alias moves when the line-up moves, and a model change mid-corpus
+# is the same problem as a spec change mid-corpus. The September 2026 corpus (tag
+# eval-corpus-2026-09) ran on claude-opus-4-8; a run on this model is a new experiment, not a
+# reproduction of it. --model applies to all three agents (agent under test, simulated person,
+# provider).
+DEFAULT_MODEL = "claude-opus-5-5"
+
 TIMEOUT_ASK_PERSON = 900          # a human may be typing
 # The provider may have to BUILD its reference panel before it can build a distribution,
 # and the panel is proportional to the model. Measured 2026-08-05: 1,113,668 variants took

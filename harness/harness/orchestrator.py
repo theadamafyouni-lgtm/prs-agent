@@ -935,6 +935,10 @@ class Orchestrator:
 
         self.manifest = manifest.Manifest(self.run_id, self.vault_dir)
         self.transcript = manifest.Transcript(os.path.join(self.vault_dir, "transcript.jsonl"))
+        # Read off the run, not off a config default: None means no --model reached the CLI,
+        # so the CLI's own default (unrecorded, and liable to move) was used.
+        self.manifest.set("model", {"requested": self.model,
+                                    "applies_to": ["prs", "persona", "provider"]})
 
         if self.stop_after:
             # Written before the agent launches, so even a run that dies mid-flight says it

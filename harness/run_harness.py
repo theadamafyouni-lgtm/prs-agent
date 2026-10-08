@@ -303,7 +303,9 @@ def main():
         p.add_argument("--patient", help="the person's genotype file")
         p.add_argument("--persona", default="p01", help="persona id, for unattended runs")
         p.add_argument("--backend", choices=["persona", "human"], default="persona")
-        p.add_argument("--model", help="model for the spawned agents")
+        p.add_argument("--model", default=config.DEFAULT_MODEL,
+                       help="model for all three spawned agents (default: config.DEFAULT_MODEL, "
+                            "%s)" % config.DEFAULT_MODEL)
 
     r = sub.add_parser("run", help="stage, gate, and run the pipeline end to end")
     common(r)
