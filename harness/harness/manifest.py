@@ -16,6 +16,7 @@ import os
 import platform
 import socket
 import subprocess
+import threading
 import time
 
 from . import auth, config
@@ -27,22 +28,26 @@ class Transcript:
     def __init__(self, path):
         self.path = path
         self.n = 0
+        # The router and a provider thread both append. Without the lock two records can
+        # take the same seq, or interleave inside one line of the JSONL.
+        self._lock = threading.Lock()
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
 
     def append(self, direction, kind, text="", question_id=None, meta=None):
-        self.n += 1
-        rec = {
-            "seq": self.n,
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "direction": direction,
-            "kind": kind,
-            "question_id": question_id,
-            "text": text,
-            "meta": meta or {},
-        }
-        with open(self.path, "a") as fh:
-            fh.write(json.dumps(rec, sort_keys=False) + "\n")
-            fh.flush()
+        with self._lock:
+            self.n += 1
+            rec = {
+                "seq": self.n,
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "direction": direction,
+                "kind": kind,
+                "question_id": question_id,
+                "text": text,
+                "meta": meta or {},
+            }
+            with open(self.path, "a") as fh:
+                fh.write(json.dumps(rec, sort_keys=False) + "\n")
+                fh.flush()
         return rec
 
     def read(self):
@@ -138,6 +143,9 @@ class Manifest:
         self.dir = vault_dir
         self.path = os.path.join(vault_dir, "manifest.json")
         os.makedirs(vault_dir, exist_ok=True)
+        # A provider thread records its invocations while the main thread may be writing;
+        # a dict changed mid-write fails the write.
+        self._lock = threading.RLock()
         self.data = {
             "run_id": run_id,
             "harness_version": "1.0",
@@ -157,16 +165,23 @@ class Manifest:
         }
 
     def set(self, key, value):
-        self.data[key] = value
+        with self._lock:
+            self.data[key] = value
         return value
 
     def agent(self, name, **fields):
-        self.data["agents"].setdefault(name, {}).update(fields)
+        with self._lock:
+            self.data["agents"].setdefault(name, {}).update(fields)
 
     def caveat(self, text):
-        self.data["caveats"].append(text)
+        with self._lock:
+            self.data["caveats"].append(text)
 
     def write(self):
+        with self._lock:
+            return self._write()
+
+    def _write(self):
         self.data["finished_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         tmp = self.path + ".tmp"
         with open(tmp, "w") as fh:

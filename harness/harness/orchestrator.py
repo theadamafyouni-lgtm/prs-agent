@@ -49,12 +49,19 @@ or `[no reply from the person]`. The last three are real outcomes, not errors to
 
 ## Reaching the reference provider
 
-    python3 comms/harness_client.py request-reference --request runs/{run_id}/interpret/request.json
+    python3 comms/harness_client.py request-reference --no-wait \\
+        --request runs/{run_id}/interpret/request.json
 
-It blocks and prints the path where the provider's artifact landed, which you then pass to
+prints a request id at once. Building a reference can take hours, longer than one command
+may run, so collect the result with
+
+    python3 comms/harness_client.py await-reference --id <that id> --timeout 540
+
+and repeat it while it exits 6, which means still running. When the provider has answered it
+prints the path where the provider's artifact landed, which you then pass to
 `tools/reference_adapter.py --reference <that path>`. It may instead report that no usable
 reference could be built, or that none was supplied. Both are outcomes the contract provides
-for. Do not work around either.
+for. Do not work around either. The person can still be asked questions while you wait.
 
 ## Two things about this environment that differ from the skill text
 
@@ -561,6 +568,20 @@ def _as_text(v):
     return v.decode("utf-8", "replace") if isinstance(v, bytes) else str(v)
 
 
+def _runs_version(path):
+    """The first line `path --version` prints, or why it could not run here."""
+    if not os.path.isfile(path):
+        return "absent"
+    try:
+        proc = subprocess.run([path, "--version"], capture_output=True, text=True,
+                              timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return "%s: %s" % (type(exc).__name__, exc)
+    text = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    return text.splitlines()[0] if proc.returncode == 0 and text else (
+        "exit %d: %s" % (proc.returncode, text[:200]))
+
+
 # ---------------------------------------------------------------------------
 # result.json
 #
@@ -916,6 +937,12 @@ class Orchestrator:
         self._int1 = []
         self._ask_lock = threading.Lock()
         self._asking = None
+        # A reference build runs for up to TIMEOUT_PROVIDER in its own thread, so the router
+        # keeps serving the person meanwhile. One at a time: the provider sandbox is a single
+        # directory, and two builds in it would overwrite each other's inputs and artifact.
+        self._ref_lock = threading.Lock()
+        self._ref_threads = []
+        self._int1_lock = threading.Lock()
 
     # ==================================================================
     # staging
@@ -1271,10 +1298,23 @@ class Orchestrator:
             staging.copy_in(panel_tool,
                             os.path.join(root, "build_reference_panel.py"), r,
                             "provider-tool")
-        plink = os.path.join(config.PROVIDER_SRC, "plink2")
-        if os.path.exists(plink):
+        # build_reference.py runs ./plink2. The bundled one is a macOS arm64 build, which
+        # cannot execute on Linux; there the pinned refdata/bin/plink2 travels instead.
+        # Chosen by trying each, and recorded with the reason, so a run says which binary
+        # scored its reference.
+        plink, why = None, []
+        for cand in (os.path.join(config.PROVIDER_SRC, "plink2"),
+                     os.path.join(config.REFDATA_SRC, "bin", "plink2")):
+            version = _runs_version(cand)
+            if version.startswith("PLINK"):
+                plink = cand
+                why.append("%s runs: %s" % (cand, version))
+                break
+            why.append("%s does not run here: %s" % (cand, version))
+        if plink:
             staging.copy_in(plink, os.path.join(root, "plink2"), r, "provider-binary",
                             mode=0o555)
+        r.notes.append({"kind": "provider_plink2", "staged_from": plink, "why": why})
         staging.copy_in(
             os.path.join(config.AGENT, "interfaces", "reference-distribution.md"),
             os.path.join(root, "CONTRACT.md"), r, "provider-contract")
@@ -1451,9 +1491,44 @@ class Orchestrator:
         if kind == "ask-person":
             return self._handle_ask(msg, inbox)
         if kind == "request-reference":
-            return self._handle_reference(msg, inbox, profiles)
+            return self._start_reference(msg, inbox, profiles)
         self._reply(inbox, msg["message_id"],
                     {"status": "error", "reason": "unknown message kind %r" % kind})
+
+    def _start_reference(self, msg, inbox, profiles):
+        """Hand the request to a provider in its own thread, and return to routing.
+
+        The provider can run for hours. Handled inline, it held the router for all of that
+        time, so a question to the person sat unrouted until the reference was built. The
+        reply still arrives in the inbox under the request's message id, whichever thread
+        writes it, so the client's blocking form and its await form both read it from there.
+        """
+        if not self._ref_lock.acquire(blocking=False):
+            self.transcript.append(
+                direction="harness->agent", kind="int1_rejected_busy",
+                text=str(msg.get("request_path", "")),
+                meta={"message_id": msg.get("message_id"),
+                      "note": "refused: a reference request is already being built"})
+            self._reply(inbox, msg["message_id"],
+                        {"status": "busy",
+                         "reason": "a reference request is already being built. Await that "
+                                   "one before sending another."})
+            return
+
+        def work():
+            try:
+                self._handle_reference(msg, inbox, profiles)
+            except Exception as exc:  # noqa: BLE001
+                self._errors.put(exc)
+                self._reply(inbox, msg.get("message_id"),
+                            {"status": "error", "reason": str(exc)})
+            finally:
+                self._ref_lock.release()
+
+        t = threading.Thread(target=work, name="int1-%s" % msg.get("message_id"),
+                             daemon=True)
+        self._ref_threads.append(t)
+        t.start()
 
     def _handle_ask(self, msg, inbox):
         # The person has already gone. Asking again would re-invoke the persona, write an
@@ -1538,23 +1613,48 @@ class Orchestrator:
             self._reply(inbox, msg["message_id"], {"status": "timeout"})
 
     def _handle_reference(self, msg, inbox, profiles):
-        req = msg["request_path"]
+        req = str(msg.get("request_path") or "")
+        # The path is the agent's. It is resolved, links and all, and must land inside this
+        # run's own directory before the harness reads it with its own authority -- the hash
+        # below is already a read.
+        run_dir = os.path.join(self.prs_root, "runs", self.run_id)
+        if provider.contained(req, run_dir) is None or not os.path.isfile(req):
+            reason = ("refused: the request path %r resolves to %s, which is not a file "
+                      "inside this run's directory %s"
+                      % (req, os.path.realpath(req) if req else None, run_dir))
+            self.transcript.append(direction="harness->agent", kind="int1_request_refused",
+                                   text=req, meta={"message_id": msg.get("message_id"),
+                                                   "reason": reason})
+            with self._int1_lock:
+                self._int1.append({"request": req, "staging": None,
+                                   "result": {"status": "error", "reason": reason}})
+            self._reply(inbox, msg["message_id"], {"status": "error", "reason": reason})
+            return
         self.transcript.append(direction="agent->provider", kind="int1_request",
                                text=req, meta={"message_id": msg["message_id"],
                                                "sha256": staging.sha256(req)})
 
         handoff = provider.ProviderHandoff(self.provider_root, self.record, self.transcript)
-        summary = handoff.stage_guarded(req, self.prs_root)
-        self._int1.append({"request": req, "staging": summary})
+        summary = handoff.stage_guarded(req, self.prs_root, run_dir)
+        # This handoff's own record. Every later write goes to it under the lock, not to
+        # self._int1[-1], which is finish()'s to read from another thread.
+        entry = {"request": req, "staging": summary}
+        with self._int1_lock:
+            self._int1.append(entry)
 
-        if handoff.ambiguous:
-            # Two candidates for an input that must be unique. Staging a guess would put a
-            # silently wrong percentile into a clinical artifact, so the run says so instead.
-            self.transcript.append(direction="harness->agent", kind="int1_ambiguous_input",
-                                   text=handoff.ambiguous)
-            self._int1[-1]["result"] = {"status": "error", "reason": handoff.ambiguous}
-            self._reply(inbox, msg["message_id"],
-                        {"status": "error", "reason": handoff.ambiguous})
+        if handoff.ambiguous or handoff.refused:
+            # Two candidates for an input that must be unique, or a file the agent named
+            # outside its own run. Staging a guess would put a silently wrong percentile into
+            # a clinical artifact, and fetching the file would be the harness acting on the
+            # agent's say-so, so the run says so instead.
+            problem = handoff.ambiguous or handoff.refused
+            self.transcript.append(
+                direction="harness->agent",
+                kind="int1_ambiguous_input" if handoff.ambiguous else "int1_path_refused",
+                text=problem)
+            with self._int1_lock:
+                entry["result"] = {"status": "error", "reason": problem}
+            self._reply(inbox, msg["message_id"], {"status": "error", "reason": problem})
             return
 
         pconf = profiles["provider"]
@@ -1570,7 +1670,8 @@ class Orchestrator:
         if art is None:
             self.transcript.append(direction="provider->agent", kind="int1_unavailable",
                                    text=problem or "")
-            self._int1[-1]["result"] = {"status": "unavailable", "reason": problem}
+            with self._int1_lock:
+                entry["result"] = {"status": "unavailable", "reason": problem}
             self._reply(inbox, msg["message_id"],
                         {"status": "unavailable", "reason": problem})
             return
@@ -1582,13 +1683,14 @@ class Orchestrator:
         # reference_adapter.py is what validates it against the contract, and pre-empting
         # that would move a judgment out of the pipeline and into the harness.
         usable = art.get("usable")
-        self._int1[-1]["result"] = {
-            "status": "delivered" if usable is not False else "unusable",
-            "usable": usable, "reason": art.get("reason"),
-            "n_participants": art.get("n_participants"),
-            "source": art.get("source"), "delivery": delivery,
-            "provider_rc": rc,
-        }
+        with self._int1_lock:
+            entry["result"] = {
+                "status": "delivered" if usable is not False else "unusable",
+                "usable": usable, "reason": art.get("reason"),
+                "n_participants": art.get("n_participants"),
+                "source": art.get("source"), "delivery": delivery,
+                "provider_rc": rc,
+            }
         self.transcript.append(
             direction="provider->agent",
             kind="int1_artifact" if usable is not False else "int1_refusal",
@@ -1776,6 +1878,20 @@ class Orchestrator:
         if self.backend:
             self.manifest.agent("person_backend_close", **(self.backend.close() or {}))
 
+        # A provider thread can outlive the PRS agent. Its result was never read, and that
+        # is recorded rather than waited out -- the build can run for hours after nobody is
+        # left to use it.
+        still_running = []
+        for t in self._ref_threads:
+            t.join(timeout=10)
+            if t.is_alive():
+                still_running.append(t.name)
+        if still_running:
+            self.manifest.caveat(
+                "A reference provider was still running when the PRS agent exited (%s). "
+                "Whatever it produces afterwards was never delivered to or read by the "
+                "agent." % ", ".join(still_running))
+
         routing_errors = []
         while True:
             try:
@@ -1789,8 +1905,11 @@ class Orchestrator:
             self.manifest.caveat("%d message(s) failed to route: %s"
                                  % (len(routing_errors), routing_errors[:5]))
 
-        self.manifest.set("int1", {"handoffs": self._int1,
-                                   "n_handoffs": len(self._int1),
+        with self._int1_lock:
+            handoffs = json.loads(json.dumps(self._int1, default=str))
+        self.manifest.set("int1", {"handoffs": handoffs,
+                                   "n_handoffs": len(handoffs),
+                                   "provider_still_running_at_finish": still_running,
                                    "routing_errors": routing_errors,
                                    "unclaimed_request": self._check_unclaimed_request()})
         self.manifest.set("network", {
@@ -1905,7 +2024,8 @@ class Orchestrator:
             "answers_received": getattr(self, "_answers_seen", 0),
             "routing_errors": len(routing_errors),
             "int1_arm_exercised": any(
-                h["staging"]["inputs_match_requested_model"] for h in self._int1),
+                (h.get("staging") or {}).get("inputs_match_requested_model")
+                for h in handoffs),
             "what_this_run_can_and_cannot_test": what_tested,
         })
 

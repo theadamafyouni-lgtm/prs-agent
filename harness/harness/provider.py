@@ -39,15 +39,18 @@ import shutil
 
 from . import config, staging
 
-# The seven basenames main() constructs through `I = lambda name: join(args.inputs, name)`.
-# There is no per-file CLI flag, so these names are the interface.
+# The staged basenames. projection.json, ref_pca.eigenvec, ref_pca.eigenval and
+# sample_labels.json are read by exactly these names through main()'s
+# `I = lambda name: join(args.inputs, name)` -- there is no per-file flag for them, so the
+# names are the interface. The rest are passed to the tool as arguments.
 PROVIDER_INPUTS = {
     "dosages": "dosages_leaveout_{pgs}.tsv",
+    "score_input": "plink_score_input.tsv",
     "scoring": "{pgs}_hmPOS_GRCh37.txt.gz",
     "projection": "projection.json",
     "eigenvec": "ref_pca.eigenvec",
     "eigenval": "ref_pca.eigenval",
-    "panel": "integrated_call_samples_v3.20130502.ALL.panel",
+    "labels": "sample_labels.json",
     "ref_vcf": "ref_1kg_{pgs}.vcf.gz",
 }
 
@@ -92,16 +95,29 @@ on, because a default would be one run's value applied to every other run:
 
     python3 build_reference.py \\
       --dosages inputs/<the dosages file named in INPUTS.md> \\
+      --score-input inputs/plink_score_input.tsv \\
       --scoring inputs/<the scoring file> \\
       --ref-vcf inputs/<the reference panel VCF> \\
+      --request request.json \\
       --effect-weight-col <the weight column, read off the scoring file's own header> \\
+      --reference-assay "<what assay produced the reference genotypes, in your words>" \\
       --k <how many nearest reference samples to select> \\
       --min-cohort <refuse below this cohort size> \\
+      --k-rationale "<why you chose these values>" \\
       --workdir work --out {out}
+
+`--score-input` is the file the patient's own score was computed from. The cohort is scored
+from that same file by the same plink2 recipe, and the tool reports how many of its variants
+plink2 actually used for each side; `scoring_parity` follows from those counts.
 
 `--k` and `--min-cohort` are yours to choose and the contract asks you to state what you
 used -- `cohort_construction_rule` and `too_few_threshold_used` are required fields. There is
-no derived value for either; say what you chose and why.
+no derived value for either; say what you chose and why, in `--k-rationale`.
+
+`--max-kth-distance` is also available: refuse when the k-th nearest reference sample is
+further than that distance in PC space. It has no default and the tool applies no check
+without it. Whether to set one, and to what, is your call; the artifact records the value
+used, or that there was none, and `--k-rationale` is where to say why.
 
 `--expected-abs-beta` is OPTIONAL and is a regression guard against a PRIOR run of this same
 patient and model. Do not compute it from the very data it would check -- that turns a real
@@ -155,6 +171,25 @@ class AmbiguousInput(Exception):
     """
 
 
+class OutsideRun(Exception):
+    """A path the agent supplied resolves outside the requesting run's own directory.
+
+    The harness copies these files with its own authority, into a sandbox the requesting
+    agent cannot reach. A request naming /etc/..., another run, or a symlink that points out
+    of the run would have the harness fetch it on the agent's behalf. Refused, not staged.
+    """
+
+
+def contained(path, root):
+    """realpath(path) if it lies inside realpath(root), else None.
+
+    Symlinks are resolved before the comparison, so a link inside the run that points out
+    of it is outside.
+    """
+    rp, rr = os.path.realpath(path), os.path.realpath(root)
+    return rp if rp == rr or rp.startswith(rr + os.sep) else None
+
+
 class ProviderHandoff:
     def __init__(self, sandbox_root, record, transcript):
         self.root = sandbox_root
@@ -168,6 +203,9 @@ class ProviderHandoff:
         self.request = None
         self.pgs = None
         self.ambiguous = None
+        self.refused = None
+        self.basis = None
+        self.run_dir = None
         # Set at stage() time: whether the provider has what it needs to build a missing
         # reference panel itself. Recorded so a run where it could not is distinguishable
         # from one where it chose not to.
@@ -175,11 +213,22 @@ class ProviderHandoff:
         self.panel_buildable = os.path.isdir(self.phase3_dir)
 
     # -- staging ---------------------------------------------------------
-    def stage(self, request_path, prs_sandbox_root):
-        """Copy in what exists, name what does not, and record both."""
+    def stage(self, request_path, prs_sandbox_root, run_dir):
+        """Copy in what exists, name what does not, and record both.
+
+        Every file taken from the PRS sandbox on the strength of a path the agent wrote must
+        resolve inside `run_dir`, the requesting run's own runs/<RUN>/ directory.
+        """
         os.makedirs(self.inputs, exist_ok=True)
         os.makedirs(self.workdir, exist_ok=True)
+        self.run_dir = run_dir
 
+        real = contained(request_path, run_dir)
+        if real is None:
+            raise OutsideRun("the request %r resolves to %s, outside the requesting run's "
+                             "directory %s" % (request_path, os.path.realpath(request_path),
+                                               run_dir))
+        request_path = real
         with open(request_path) as fh:
             self.request = json.load(fh)
         self.pgs = ((self.request.get("model") or {}).get("pgs_id") or "").strip()
@@ -195,6 +244,8 @@ class ProviderHandoff:
             "resolved_positions_manifest")
         patient["resolved_positions_manifest"] = os.path.join(
             "inputs", PROVIDER_INPUTS["dosages"].format(pgs=self.pgs or "UNKNOWN"))
+        patient["score_input_original"] = patient.get("score_input")
+        patient["score_input"] = os.path.join("inputs", PROVIDER_INPUTS["score_input"])
         local["patient"] = patient
         local["_harness_note"] = (
             "Paths rewritten to the local inputs/ directory. The original values, which "
@@ -206,28 +257,33 @@ class ProviderHandoff:
         want = {k: v.format(pgs=self.pgs or "UNKNOWN") for k, v in PROVIDER_INPUTS.items()}
 
         # From the requesting run.
-        self._try(want["dosages"], self._resolve_dosages(prs_sandbox_root),
+        self._try(want["dosages"], self._resolve_patient_path("resolved_positions_manifest",
+                                                              prs_sandbox_root),
                   "the patient's resolved per-variant dosages, from the requesting run")
-        self._try(want["scoring"], self._resolve_scoring(prs_sandbox_root),
+        self._try(want["score_input"], self._resolve_patient_path("score_input",
+                                                                  prs_sandbox_root),
+                  "the score input the patient's raw score was computed from; the cohort "
+                  "is scored from this same file")
+        self._try(want["scoring"], self._resolve_scoring(),
                   "the harmonized scoring file the requesting run actually used")
-        self._try(want["projection"], self._resolve_projection(prs_sandbox_root),
+        projection = self._resolve_projection()
+        self._try(want["projection"], projection,
                   "the patient's PCA projection, from the requesting run")
 
-        # From reference data. The eigenvec MUST be the basis the patient's projection was
-        # computed against; a mismatched pair puts the patient's coordinates in a different
-        # decomposition from the panel's, and every distance downstream is meaningless.
-        # build_reference.py has a hard self-check for exactly this and stops rather than
-        # reconciling, which is the right behaviour -- so the harness stages the basis the
-        # run recorded, and if the run built its own, that is the one that travels.
-        base = self._resolve_pca_basis(prs_sandbox_root)
+        # The PCA basis. It MUST be the one the patient's projection was computed against;
+        # a mismatched pair puts the patient's coordinates in a different decomposition from
+        # the panel's, and every distance downstream is meaningless. build_reference.py has
+        # a hard self-check for exactly this and stops rather than reconciling. The basis is
+        # identified by the projection's own record of it, and its labels travel with it:
+        # they are the labels the projection's recorded neighbours were counted with.
+        base = self._resolve_pca_basis(prs_sandbox_root, projection)
         self._try(want["eigenvec"], os.path.join(base, "ref_pca.eigenvec") if base else None,
                   "the PCA basis the patient's projection was computed against")
         self._try(want["eigenval"], os.path.join(base, "ref_pca.eigenval") if base else None,
                   "eigenvalues of that basis; absent, the artifact silently changes shape")
-        self._try(want["panel"],
-                  os.path.join(config.REFDATA_SRC, "ancestry-ref",
-                               "integrated_call_samples_v3.20130502.ALL.panel"),
-                  "1000 Genomes sample-to-population labels")
+        self._try(want["labels"], os.path.join(base, "sample_labels.json") if base else None,
+                  "that basis's own sample-to-population labels, the ones ancestry.py "
+                  "counted the projection's recorded neighbours with")
 
         # The model-specific reference VCF. Present for exactly one model.
         native = os.path.join(config.PROVIDER_SRC, "inputs",
@@ -238,12 +294,16 @@ class ProviderHandoff:
         self._write_inputs_readme(want)
         return self.summary()
 
-    def stage_guarded(self, request_path, prs_sandbox_root):
-        """stage(), but an ambiguous input is a reported refusal rather than a coin flip."""
+    def stage_guarded(self, request_path, prs_sandbox_root, run_dir):
+        """stage(), but an ambiguous input is a reported refusal rather than a coin flip,
+        and a path outside the requesting run is refused rather than fetched."""
         try:
-            return self.stage(request_path, prs_sandbox_root)
+            return self.stage(request_path, prs_sandbox_root, run_dir)
         except AmbiguousInput as exc:
             self.ambiguous = str(exc)
+            return self.summary()
+        except OutsideRun as exc:
+            self.refused = str(exc)
             return self.summary()
 
     def _try(self, basename, src, why):
@@ -258,23 +318,32 @@ class ProviderHandoff:
                                      "looked_for": src or "(nothing to look for)"}
 
     # -- resolution ------------------------------------------------------
-    def _resolve_dosages(self, prs_root):
-        """The dosages file the request itself names, resolved against the sandbox.
+    def _resolve_patient_path(self, field, prs_root):
+        """A file the request's patient block names, resolved against the sandbox.
 
-        The request's `resolved_positions_manifest` is authoritative. Guessing a filename
-        here would risk handing over a different variant set from the one the score was
-        computed on, and every parse would succeed -- the failure would be silent and would
-        land in the percentile.
+        The request is authoritative for which file. Guessing a filename here would risk
+        handing over a different variant set from the one the score was computed on, and
+        every parse would succeed -- the failure would be silent and would land in the
+        percentile. Where the file is, though, is checked rather than taken: it must resolve
+        inside the requesting run's directory, or the request is refused.
         """
-        p = ((self.request.get("patient") or {}).get("resolved_positions_manifest") or "")
+        p = ((self.request.get("patient") or {}).get(field) or "")
         if not p:
             return None
-        cand = p if os.path.isabs(p) else os.path.join(prs_root, p)
-        if os.path.exists(cand):
-            return cand
+        cands = [p if os.path.isabs(p) else os.path.join(prs_root, p)]
         # The request may name a path relative to the run root rather than the sandbox root.
-        alt = os.path.join(prs_root, p.lstrip("./"))
-        return alt if os.path.exists(alt) else None
+        cands.append(os.path.join(prs_root, p.lstrip("./")))
+        for cand in cands:
+            if not os.path.lexists(cand):
+                continue
+            real = contained(cand, self.run_dir)
+            if real is None:
+                raise OutsideRun("patient.%s %r resolves to %s, outside the requesting "
+                                 "run's directory %s" % (field, p, os.path.realpath(cand),
+                                                         self.run_dir))
+            if os.path.isfile(real):
+                return real
+        return None
 
     @staticmethod
     def _all(root, pred):
@@ -295,41 +364,90 @@ class ProviderHandoff:
             raise AmbiguousInput("%s is ambiguous: %d candidates -- %s" % (what, len(hits), hits))
         return hits[0]
 
-    def _resolve_scoring(self, prs_root):
+    def _in_run(self, hit):
+        real = contained(hit, self.run_dir)
+        if real is None:
+            raise OutsideRun("%s resolves to %s, outside the requesting run's directory %s"
+                             % (hit, os.path.realpath(hit), self.run_dir))
+        return real
+
+    def _resolve_scoring(self):
         if not self.pgs:
             return None
         # Exact basename, not startswith: `PGS0_hmPOS_GRCh38.txt.gz` also starts with the
         # model id, and staging it under the GRCh37 name would present a build mismatch to
         # the provider as a match.
         want = PROVIDER_INPUTS["scoring"].format(pgs=self.pgs)
-        return self._one(self._all(os.path.join(prs_root, "runs"),
-                                   lambda c, f: f == want), "the scoring file")
+        hit = self._one(self._all(self.run_dir, lambda c, f: f == want), "the scoring file")
+        return self._in_run(hit) if hit else None
 
-    def _resolve_projection(self, prs_root):
-        return self._one(self._all(os.path.join(prs_root, "runs"),
-                                   lambda c, f: f == "projection.json"), "projection.json")
+    def _resolve_projection(self):
+        hit = self._one(self._all(self.run_dir, lambda c, f: f == "projection.json"),
+                        "projection.json")
+        return self._in_run(hit) if hit else None
 
-    def _resolve_pca_basis(self, prs_root):
-        """Where the run's own PCA basis landed.
+    def _resolve_pca_basis(self, prs_root, projection_path):
+        """The basis directory the patient's projection was computed against.
 
-        refdata is read-only in the sandbox, so `ancestry.py build-ref --out-dir` cannot
-        write to its documented location and the agent must have chosen a writable one. This
-        finds it by looking for the files rather than by assuming a path.
+        ancestry.py copies the basis's reference_build.json, generated_utc and all, into
+        projection.json as `reference_build`, so the basis is the directory whose own
+        reference_build.json equals that record exactly. Anything looser is ambiguous in a
+        sandbox that holds both refdata/ancestry-ref/hgdp_basis and a basis the agent built
+        under runs/<RUN>/: both carry ref_pca.eigenvec and ref_pca.afreq. No match leaves the
+        basis absent, which the provider sees and reports.
         """
-        dirs = []
+        try:
+            with open(projection_path) as fh:
+                want = json.load(fh).get("reference_build")
+        except (TypeError, OSError, ValueError, AttributeError):
+            want = None
+        if not want:
+            self.basis = {"dir": None, "why": "projection.json carries no reference_build"}
+            return None
+        dirs, n_bases = [], 0
         for cur, d, files in os.walk(prs_root):
             d.sort()
-            if "ref_pca.eigenvec" in files and "ref_pca.afreq" in files:
-                dirs.append(cur)
-        return self._one(dirs, "the PCA basis directory")
+            if "ref_pca.eigenvec" not in files or "ref_pca.afreq" not in files:
+                continue
+            n_bases += 1
+            try:
+                with open(os.path.join(cur, "reference_build.json")) as fh:
+                    if json.load(fh) == want:
+                        dirs.append(cur)
+            except (OSError, ValueError):
+                continue
+        self.basis = {"n_basis_directories_found": n_bases, "candidates": dirs,
+                      "matched_on": "reference_build.json equal to projection.json's "
+                                    "reference_build"}
+        staged = ("ref_pca.eigenvec", "ref_pca.eigenval", "sample_labels.json")
+
+        def fingerprint(d):
+            return tuple(staging.sha256(os.path.join(d, f))
+                         if os.path.isfile(os.path.join(d, f)) else None for f in staged)
+
+        # Copies of one basis are one basis: if every candidate's staged files hash the
+        # same, the choice between them changes nothing that is staged.
+        if len(dirs) > 1 and len({fingerprint(d) for d in dirs}) == 1:
+            dirs = dirs[:1]
+            self.basis["note"] = "identical copies; the first in walk order was staged"
+        base = self._one(dirs, "the PCA basis directory")
+        if base:
+            for f in staged:
+                path = os.path.join(base, f)
+                if os.path.lexists(path) and contained(path, prs_root) is None:
+                    raise OutsideRun("%s resolves to %s, outside the PRS sandbox"
+                                     % (path, os.path.realpath(path)))
+        self.basis["dir"] = base
+        return base
 
     def _write_inputs_readme(self, want):
         lines = [
             "# What is in this directory",
             "",
-            "`build_reference.py` looks for each of these by an exact basename constructed",
-            "in `main()`. There is no per-file command-line flag, so a file under any other",
-            "name is invisible to it.",
+            "`build_reference.py` reads `projection.json`, `ref_pca.eigenvec`,",
+            "`ref_pca.eigenval` and `sample_labels.json` from here by those exact names; there",
+            "is no flag for them. The others are passed as arguments -- see the brief. The",
+            "request itself is `request.json`, one directory up.",
             "",
             "## Present",
             "",
@@ -392,8 +510,10 @@ class ProviderHandoff:
             "inputs_match_requested_model": matched,
             "staged": self.staged,
             "absent": self.absent,
-            "int1_arm_exercised": matched and not self.ambiguous,
+            "int1_arm_exercised": matched and not self.ambiguous and not self.refused,
             "ambiguous_input": self.ambiguous,
+            "refused_path": self.refused,
+            "pca_basis": self.basis,
             "panel_buildable": self.panel_buildable,
             "note": (
                 "The pre-staged reference VCF and two input basenames are specific to %s. "
