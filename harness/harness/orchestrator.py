@@ -2128,7 +2128,14 @@ class Orchestrator:
             "person_ended_session": bool(self.live and self.live.ended_by_person()),
             "answers_received": getattr(self, "_answers_seen", 0),
             "routing_errors": len(routing_errors),
+            # Exercised means a provider answered: it delivered an artifact, usable or a
+            # refusal. It used to mean "a prebuilt panel for exactly this model was staged",
+            # which only the hand-built PGS005168 files ever satisfied, so a run whose provider
+            # built its own panel and delivered a usable reference read "False".
             "int1_arm_exercised": any(
+                isinstance(h.get("result"), dict) and h["result"].get("status") == "delivered"
+                for h in handoffs),
+            "int1_prebuilt_panel_matched": any(
                 (h.get("staging") or {}).get("inputs_match_requested_model")
                 for h in handoffs),
             "what_this_run_can_and_cannot_test": what_tested,

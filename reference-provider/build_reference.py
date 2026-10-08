@@ -830,9 +830,13 @@ def score_cohort(plink2, ref_vcf, score_input, keep_path, sample_ids, out_prefix
 
     Same score input file, same variant IDs (@:#), the same duplicate and multiallelic
     exclusions at import, the same `--score ... 1 2 3 header cols=+scoresums,+denom
-    no-mean-imputation`. The only additions are --keep, which selects the cohort, and
-    list-variants, which makes plink2 name the variants it actually used so the parity
-    count is plink2's own rather than an inference.
+    no-mean-imputation`. The additions are --keep, which selects the cohort; list-variants,
+    which makes plink2 name the variants it actually used so the parity count is plink2's own
+    rather than an inference; and --snps-only just-acgt. The patient's dosages come from an
+    SNV-only imputation panel, but this panel is cut from phase3 at the model's positions and
+    can carry an indel where the patient has an SNV. Both then get the same @:# ID and
+    --rm-dup drops both, leaving the SNV unscored for the cohort: 21 of 1,093,407 on p29's
+    first run. plink2 applies --snps-only at load, before --rm-dup, so the SNV survives.
     """
     with open(keep_path, "w") as fh:
         fh.write("#IID\n")
@@ -840,6 +844,7 @@ def score_cohort(plink2, ref_vcf, score_input, keep_path, sample_ids, out_prefix
             fh.write("%s\n" % s)
 
     log = run_plink2(plink2, ["--vcf", ref_vcf,
+                              "--snps-only", "just-acgt",
                               "--set-all-var-ids", "@:#", "--rm-dup", "exclude-all",
                               "--import-max-alleles", "2",
                               "--keep", keep_path,
