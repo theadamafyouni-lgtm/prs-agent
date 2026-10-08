@@ -137,7 +137,11 @@ join was not verified, which is the honest position on a first run.
       --chr-col hm_chr --pos-col hm_pos \\
       --phase3-dir <the phase3 directory named in INPUTS.md> \\
       --chromosomes 1-22 --workers 4 --threads 2 \\
-      --out inputs/<the reference panel basename INPUTS.md names as absent>
+      --out inputs/<the reference panel file INPUTS.md names as absent, .vcf.gz included>
+
+`--out` is that file name in full, ending in `.vcf.gz`, and the same path is what
+`build_reference.py` takes as `--ref-vcf`. bcftools finds the index only under that ending;
+the builder refuses any other name before it starts.
 
 `--workers` extracts that many chromosomes concurrently and `--threads` is bcftools
 threads within each one; they multiply, so keep their product near the core count.
@@ -155,14 +159,21 @@ panel build, and `build_reference.py` on a large model, can take longer than tha
 the background, then wait for it with calls that each return inside one tool call -- give each
 of those a 600000 ms timeout:
 
-    nohup python3 build_reference_panel.py ... > work/panel.log 2>&1 &
-    timeout 540 bash -c 'until [ -e inputs/<panel basename>.provenance.json ]; do sleep 20; done'; tail -3 work/panel.log
+    rm -f work/panel.exit
+    ( trap '' HUP; python3 build_reference_panel.py ... > work/panel.log 2>&1; echo $? > work/panel.exit ) > /dev/null 2>&1 &
+    timeout 540 bash -c 'until [ -e work/panel.exit ]; do sleep 20; done'; tail -3 work/panel.log; cat work/panel.exit 2>/dev/null
 
-The panel builder writes `<its --out>.provenance.json` last, after the VCF and its index, so
-that file existing means the panel is complete. Repeat the wait until it exists or the log
-shows the builder died. Do the same for `build_reference.py` (it writes the artifact path
-last). **Your background job dies when your turn ends**: do not finish your turn while a build
-is still running.
+`work/panel.exit` appears when the builder has stopped, whichever way it stopped, so the wait
+cannot outlast a dead build. Repeat the wait until it exists. Then: exit status 0 with
+`<its --out>.provenance.json` present (written last, after the VCF and its index) means the
+panel is complete; anything else means the builder died, and the end of `work/panel.log` says
+why. Remove the old exit file before every launch, as above: left over from a failed
+attempt, it would end the next wait at once with the old status. The subshell takes your
+command exactly as you would write it on its own, quotes and apostrophes included, and
+`trap '' HUP` does what `nohup` did. Do not wrap the command in `sh -c '...'`: an apostrophe in
+a free-text argument such as `--k-rationale` ends that quote and the build never starts. Do
+the same for `build_reference.py`, with its own log and `.exit` file. **Your background job
+dies when your turn ends**: do not finish your turn while a build is still running.
 
 Build it at the MODEL's positions, which is what the command
 above does: a patient's imputed dosages come out of this same panel, so building at the
