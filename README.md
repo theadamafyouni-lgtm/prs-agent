@@ -25,8 +25,8 @@ number anyway is the failure.
 
 ## What you need
 
-A Linux machine. Ubuntu 22.04 or 24.04, 8 cores, 16 GB RAM, and **at least 75 GB
-of free disk**: rebuilding the reference data peaks near 62 GB, and each running case
+A Linux machine. Ubuntu 22.04 or 24.04, 8 cores, 16 GB RAM, and **at least 95 GB
+of free disk**: rebuilding the reference data peaks near 78 GB, and each running case
 needs room of its own. A single case takes 25 to 40 minutes.
 
 You will also need a Claude account, because the agent under test is Claude Code
@@ -39,7 +39,7 @@ The macOS path exists but is not in this repository yet. See
 
 ## Setup
 
-Five steps. The reference data is about 49 GB and takes the longest: read
+Five steps. The reference data is about 65 GB and takes the longest: read
 `SETUP.md` §8 before starting. It is rebuilt from public sources and checked by
 sha256 against the copy that produced the published results, except for a few
 files §8 names.

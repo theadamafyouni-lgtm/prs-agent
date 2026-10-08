@@ -221,7 +221,7 @@ clone turns out to need them:
 **UNVERIFIED whether a fresh clone needs them.** If the gate run in section 10 fails at
 staging, look here first. Read each before running it.
 
-## 8. Reference data, about 49 GB
+## 8. Reference data, about 65 GB
 
 > **As of 2026-09-24 `agent/refdata` can be rebuilt from public sources, with the
 > exceptions listed under "What is not reproduced".** Two scripts do it:
@@ -265,9 +265,11 @@ python3 fetch_refdata.py --verify        # reads every byte; expect 0 problems
 
 # 3. Build what is derived: bin/plink2, hgdp_1kgp/, jre/ and maps/ out of their
 #    archives, fasta/ and its indexes, hgdp_1kgp.panel, the phase3 .done markers, the
-#    PCA basis hgdp_basis/, and panel/sites_index (which needs panel_index.py from the
-#    private repo, restored in section 6). About 26 GB free beyond the downloads and
-#    30-40 min. It never overwrites anything.
+#    PCA basis hgdp_basis/, panel/sites_index (which needs panel_index.py from the
+#    private repo, restored in section 6), and panel-snv/, the phase3 panel filtered to
+#    biallelic SNVs over all 2,504 samples that the score stage imputes against (16 GB;
+#    about 1 h on 8 cores, 6 h of CPU). About 42 GB free beyond the downloads, and
+#    1.5-2 h. It never overwrites anything.
 python3 build_refdata.py --plan
 python3 build_refdata.py
 
@@ -275,7 +277,7 @@ python3 build_refdata.py
 python3 build_refdata.py --check
 ```
 
-The whole rebuild peaks at about 62 GB (36 GB of downloads, 26 GB derived). After step 4
+The whole rebuild peaks at about 78 GB (36 GB of downloads, 42 GB derived). After step 4
 you can delete `agent/refdata-downloads/` (17 GB). `fetch_refdata.py` counts an archive
 whose files are all in place as present, so it will not fetch the archives again.
 
