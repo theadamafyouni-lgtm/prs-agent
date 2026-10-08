@@ -143,8 +143,8 @@ def main():
         "per_chromosome": per_chrom,
         "raw_score": total_sum,
         "raw_score_meaning": "sum(dosage x beta) over the resolved set. It is NOT a risk and NOT a "
-                             "percentile; placing it is interpret's job (INT-1..INT-3), and it "
-                             "cannot happen until the reference distribution exists.",
+                             "percentile; placing it is interpret's job (INT-1..INT-3), against a "
+                             "reference built for this model and this resolved set.",
     }
     out = os.path.join(args.out_dir, "raw_score.json")
     lib_run.emit(result, out)

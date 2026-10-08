@@ -317,6 +317,10 @@ def main():
                     st = "unresolved_allele_mismatch"
                 elif status == "below_r2_bar":
                     st = "unresolved_imputed_below_bar"
+                elif status != "resolved":
+                    # A status this tool does not know is never counted as resolved: it fails
+                    # into the gate, not out of it.
+                    st = "unresolved_" + status
                 elif src == "typed":
                     st = "resolved_directly_typed"
                 elif r2 is not None and r2 >= args.r2_bar:

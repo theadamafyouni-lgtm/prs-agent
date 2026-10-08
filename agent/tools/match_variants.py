@@ -103,7 +103,17 @@ def load_imputed(imputed_dir, wanted, targets_path):
                     dr2v = float(dr2)
                 except ValueError:
                     dr2v = None
-            table[(c, int(p))] = (ref, alt, dr2v, imp.strip() == "1", multiallelic)
+            key = (c, int(p))
+            if key in table:
+                # Two records at one position (a multiallelic site the panel carries as split
+                # biallelic records, e.g. G>A and G>T). plink2 drops both under --rm-dup
+                # exclude-all, so passing either one on would make score_plink2 use fewer
+                # variants than it was handed -- an internal-consistency STOP. It is the same
+                # situation as a multiallelic record, and is treated the same way.
+                ref0 = table[key][0]
+                table[key] = (ref0, alt, None, imp.strip() == "1", True)
+                continue
+            table[key] = (ref, alt, dr2v, imp.strip() == "1", multiallelic)
         err = proc.stderr.read()
         if proc.wait() != 0:
             raise SystemExit(f"match_variants.py: bcftools query failed on {f}\n{err[-2000:]}")
