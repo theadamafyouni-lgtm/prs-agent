@@ -118,8 +118,10 @@ def read_scorefile(path, chr_col, pos_col, w_col, id_col=None):
 
 
 def patient_positions(vcf):
+    """Positions where the person's file carries a CALLED genotype. A no-call is a missing
+    genotype kept in the normalized VCF; its presence is not a typed observation."""
     import subprocess
-    out = subprocess.run(["bcftools", "query", "-f", "%CHROM\t%POS\n", vcf],
+    out = subprocess.run(["bcftools", "query", "-i", 'GT!="mis"', "-f", "%CHROM\t%POS\n", vcf],
                          capture_output=True, text=True)
     if out.returncode != 0:
         raise SystemExit(f"weight_coverage.py: bcftools query failed\n{out.stderr[-2000:]}")
@@ -139,11 +141,18 @@ def read_dosage_r2(path):
         ix = {n: i for i, n in enumerate(header)}
         for line in fh:
             f = line.rstrip("\n").split("\t")
-            d[(f[ix["chrom"]], int(f[ix["pos"]]))] = (
-                float(f[ix["r2"]]) if f[ix["r2"]] not in ("", ".", "NA") else None,
-                f[ix["source"]],
-                f[ix["status"]] if "status" in ix else "resolved",
-            )
+            key = (f[ix["chrom"]], int(f[ix["pos"]]))
+            row = (float(f[ix["r2"]]) if f[ix["r2"]] not in ("", ".", "NA") else None,
+                   f[ix["source"]],
+                   f[ix["status"]] if "status" in ix else "resolved")
+            # A model can list one position twice (two alleles, two rows), and match_variants
+            # writes a row for each. Keyed by position, the last would silently decide for both
+            # -- an excluded row could be counted as resolved. When rows disagree, the one that
+            # is not resolved wins: a conflict fails into the gate, never out of it.
+            prev = d.get(key)
+            if prev is not None and prev[2] != row[2] and row[2] == "resolved":
+                continue
+            d[key] = row
     return d
 
 
@@ -297,12 +306,14 @@ def main():
         elif args.mode == "estimate":
             if c not in imputed_contigs:
                 st = "unresolved_contig_not_imputed"
+            elif not panel_positions.has(c, p):
+                # Beagle writes panel markers only, so a typed position the panel lacks never
+                # reaches the dosages either: it cannot be resolved by any route.
+                st = "unresolved_absent_from_panel"
             elif (c, p) in typed:
                 st = "resolved_directly_typed"
-            elif panel_positions.has(c, p):
-                st = "pending_imputation_in_panel"
             else:
-                st = "unresolved_absent_from_panel"
+                st = "pending_imputation_in_panel"
         else:
             hit = dosages.get((c, p))
             if hit is None:

@@ -83,6 +83,10 @@ def load_imputed(imputed_dir, wanted, targets_path):
     files = sorted(glob.glob(os.path.join(imputed_dir, "*.vcf.gz")))
     if not files:
         raise SystemExit(f"match_variants.py: no imputed VCFs in {imputed_dir}")
+    if not wanted:
+        # No model row has a usable coordinate. bcftools refuses an empty targets file, and
+        # the honest result is every row unresolved, which main() produces from an empty table.
+        return table, files
     with open(targets_path, "w") as fh:
         for c, p in sorted(wanted, key=lambda k: (k[0], k[1])):
             fh.write(f"{c}\t{p}\n")
