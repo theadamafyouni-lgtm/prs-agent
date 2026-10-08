@@ -69,14 +69,12 @@ PURITY_KS = [50, 100, 150, 200, 250, 300, 350, 400, 500, 750, 1000]
 SLOPE_WINDOW = 1.6
 SLOPE_SCAN_MAX = 1200
 
-# Thresholds that select which verdict cohort_fit_note reports. They exist so the
-# note's prose follows from the measurement instead of being written around it: if
-# the numbers stop supporting a centrality disclosure, the code stops emitting one.
-# Percentiles are "share of the comparison group closer to the centroid / with a
-# tighter curve than the patient", so LOW means the patient is the extreme one.
-CENTRALITY_PCT_FLAG = 5.0
-CENTRALITY_PCT_WATCH = 15.0
-SHAPE_PCT_FLAG = 10.0
+# There are no verdict thresholds. cohort_fit_note used to pick "centrality effect
+# present" / "borderline" / "no centrality effect detected" against fixed percentile
+# cutoffs (5, 15 and 10), and that verdict decided whether a disclosure was made at all.
+# Where to draw those lines is a judgment an expert could make differently, and a tool
+# only extracts; the measurements are reported, and every comparative sentence is
+# emitted only when the inequality it states holds.
 
 
 # ----------------------------------------------------------------------------
@@ -651,11 +649,9 @@ def metric_sensitivity(coords, patient_vec, order, k, sup_arr, src, eigenvals):
     out["trailing_pc_share_of_squared_distance_within_cohort"] = round(
         float(np.median(tail_share[sel])), 4)
     out["share_note"] = (
-        "Median share of squared distance contributed by PC%d and above. Panel-wide "
-        "the leading PCs still do real work, because they are what separates the "
-        "continental groups. Within the selected cohort they do almost none: at that "
-        "scale the neighbours are already alike on the leading PCs, so the ordering "
-        "is decided by the trailing ones." % (n_top + 1))
+        "Median share of squared distance contributed by PC%d and above, panel-wide and "
+        "within the selected cohort; the leading PCs contribute the rest%s."
+        % (n_top + 1, _share_comparison(out, n_top)))
 
     # Does the mixture survive weighting PCs by the variance they actually explain?
     dw = np.linalg.norm((coords - patient_vec) * np.sqrt(ev), axis=1)
@@ -923,16 +919,13 @@ def summarise(scores):
 
 
 def _fit_assessment(cohort):
-    """Decide from the measurements whether a centrality effect is distorting cohort
-    selection, and write the paragraph that follows from THAT decision.
+    """The centrality and curve-shape measurements, as prose that asserts only what the
+    numbers show.
 
-    -> (verdict, prose)
-
-    The previous version of this function wrote one fixed argument and substituted
-    numbers into it. That is how it survived a sign change in its own data: the
-    conclusion was in the format string, so no measurement could dislodge it. This
-    one selects the conclusion first, against CENTRALITY_PCT_* / SHAPE_PCT_FLAG, and
-    can return "no effect detected" -- the outcome the old shape could not express.
+    It reaches no verdict. An earlier version picked one against fixed cutoffs, and before
+    that one fixed argument had numbers substituted into it; both put a conclusion in the
+    tool. Each comparative clause here is emitted only when the inequality it states holds
+    in this run's numbers.
     """
     cen = cohort["centrality"]
     curve = cohort["distance_curve"]
@@ -949,28 +942,21 @@ def _fit_assessment(cohort):
     shape_src = shape["by_superpopulation"].get(src, {})
     shape_pct = shape_src.get("patient_percentile")
 
-    centrality_flagged = pct_central < CENTRALITY_PCT_FLAG
-    centrality_watch = pct_central < CENTRALITY_PCT_WATCH
-    shape_flagged = shape_pct is not None and shape_pct < SHAPE_PCT_FLAG
+    def rel(a, b):
+        return "below" if a < b else ("above" if a > b else "equal to")
 
-    if centrality_flagged:
-        verdict = "centrality effect present"
-    elif centrality_watch or shape_flagged:
-        verdict = "borderline -- see the numbers"
-    else:
-        verdict = "no centrality effect detected"
-
-    # --- part 1: what was tested, and the centrality answer -------------------
+    # --- part 1: what is measured, and centrality -----------------------------
     parts = [
-        "Two things can make a selected cohort look closer than it should. The "
-        "patient may sit at the centre of the reference cloud, where everything is "
-        "near; or the patient may sit inside a genuinely dense cluster, where the "
-        "closeness is real. Both are measured here rather than assumed. VERDICT: %s."
-        % verdict,
-        "Centrality: the patient's distance to the panel centroid is %.6f against a "
-        "panel median of %.6f (5th percentile %.6f, 95th %.6f). %.1f%% of the %d "
+        "Two things can make a selected cohort look closer than it should: the patient "
+        "may sit near the centre of the reference cloud, where everything is near, or "
+        "inside a dense cluster, where the closeness is real. The measurements below bear "
+        "on which; this tool reports them and reaches no verdict.",
+        "Centrality: the patient's distance to the panel centroid is %.6f, %s the panel "
+        "median of %.6f (5th percentile %.6f, 95th %.6f). %.1f%% of the %d "
         "reference samples are closer to the centroid than the patient%s."
         % (cen["patient_distance_to_centroid"],
+           rel(cen["patient_distance_to_centroid"],
+               cen["panel_median_distance_to_centroid"]),
            cen["panel_median_distance_to_centroid"],
            cen["panel_p5_distance_to_centroid"],
            cen["panel_p95_distance_to_centroid"],
@@ -979,21 +965,8 @@ def _fit_assessment(cohort):
             ", and %.1f%% of %s -- the group supplying %d of the %d selected "
             "neighbours -- are" % (pct_central_src, src, src_n, cohort["n_selected"]))),
     ]
-    if centrality_flagged:
-        parts.append(
-            "That is an extreme position: the patient is more central than all but "
-            "%.1f%% of the panel, so the neighbours selected around them are closer "
-            "than their true genetic neighbourhood warrants." % pct_central)
-    else:
-        parts.append(
-            "That is an ordinary position inside the panel, not an extreme one, so "
-            "cohort selection is not being pulled in by a point sitting at the middle "
-            "of the reference cloud.")
 
     # --- part 2: the rank profile, and the baseline that makes it readable -----
-    # Each comparative clause is emitted only when the inequality it states holds in
-    # this run's numbers. The previous text asserted BELOW / ABOVE / "mostly the
-    # baseline" / "nearly vanishes" whatever the measurements said.
     d1_meds = {g: by_sup[g]["d1"] for g in by_sup}
     tightest = min(d1_meds, key=d1_meds.get)
     loosest = max(d1_meds, key=d1_meds.get)
@@ -1002,24 +975,18 @@ def _fit_assessment(cohort):
     src_pct = pct_by_sup.get(src, {})
     s1_, s300 = src_pct.get("d1"), src_pct.get("d300")
 
-    def rel(a, b):
-        return "below" if a < b else ("above" if a > b else "equal to")
-
     flattening = p1 is not None and p300 is not None and p300 < p1
     mixture = (panel_base[1]["median"] < by_sup[src]["d1"]
                and panel_base[300]["median"] > by_sup[src]["d300"])
     src_drift_smaller = (flattening and s1_ is not None and s300 is not None
                          and abs(s1_ - s300) < abs(p1 - p300))
-    baseline_explains = flattening and mixture and src_drift_smaller
 
     if p1 is not None and p300 is not None:
         txt = ("Rank profile, against the whole panel: the patient runs from the %.1fth "
                "percentile at d1 (distance %.6f) to the %.1fth at d300 (%.6f)."
                % (p1, curve.get(1), p300, curve.get(300)))
         if flattening:
-            txt += " Read alone that looks like flattening."
-            if baseline_explains:
-                txt += " It is mostly the baseline."
+            txt += " The percentile falls from d1 to d300."
         txt += (" Across groups the median d1 spans %.6f (%s) to %.6f (%s); the "
                 "all-panel median d1 of %.6f is %s %s's %.6f and its median d300 of "
                 "%.6f is %s %s's %.6f."
@@ -1030,8 +997,8 @@ def _fit_assessment(cohort):
                    rel(panel_base[300]["median"], by_sup[src]["d300"]),
                    src, by_sup[src]["d300"]))
         if mixture:
-            txt += (" A patient near %s is therefore scored as loose at d1 and tight at "
-                    "d300 by the mixture alone." % src)
+            txt += (" A sample at %s's own median distances would therefore rank above "
+                    "the all-panel median at d1 and below it at d300." % src)
         parts.append(txt)
 
     have = [(r, src_pct["d%d" % r]) for r in BASELINE_RANKS
@@ -1042,48 +1009,43 @@ def _fit_assessment(cohort):
         txt = ("Against %s alone -- the baseline the cohort is drawn from -- the patient "
                "is the %.1fth percentile at d1 and the %.1fth at d300, a move of %.1f "
                "points where the all-panel baseline showed %.1f%s. Full profile: %s. "
-               "The patient's tightest point relative to %s is the %.1fth percentile at "
-               "d%d."
+               "The patient's lowest percentile against %s is the %.1fth, at d%d."
                % (src, s1_, s300, abs(s1_ - s300), abs(p1 - p300),
                   ", so the drift is smaller against the group than against the panel"
                   if src_drift_smaller else "",
                   prof, src, tight_v, tight_r))
         if tight_r < 300 and s300 > tight_v:
-            txt += (" After that rank the percentile rises again, to the %.1fth at d300. "
-                    "A point sitting at the centre of the cloud would instead fall as "
-                    "rank rises and stay down, because the whole panel keeps closing in "
-                    "on it." % s300)
+            txt += " After that rank the percentile rises again, to the %.1fth at d300." % s300
         parts.append(txt)
     else:
         parts.append("Against %s alone the profile is: %s." % (src, prof))
 
     # --- part 3: the scale-free statistic -------------------------------------
-    parts.append(
-        "The scale-free statistic settles it, because a group simply being denser or "
-        "sparser than the panel cannot move it. Taking %s: the patient's is %.3f "
-        "against a %s median of %.3f, the %.1fth percentile of %s members' own "
-        "curves. %s"
-        % (shape["definition"], shape["patient"], src, shape_src.get("median"),
-           shape_pct, src,
-           ("The patient's neighbourhood has the same shape as an ordinary member of "
-            "the group the cohort comes from, which is what a fit looks like and is "
-            "not what a centrality artifact looks like."
-            if not shape_flagged else
-            "That is flatter than the group's own curves, which is the shape a "
-            "centrality artifact produces.")))
+    if shape.get("patient") is not None and shape_pct is not None:
+        parts.append(
+            "Scale-free statistic, %s -- a group being uniformly denser or sparser than "
+            "the panel does not move it: the patient's is %.3f, %s the %s median of %.3f; "
+            "%.1f%% of %s members have a smaller value than the patient's."
+            % (shape["definition"], shape["patient"],
+               rel(shape["patient"], shape_src.get("median")), src,
+               shape_src.get("median"), shape_pct, src))
+    else:
+        parts.append("The scale-free statistic (%s) was not computed for %s."
+                     % (shape["definition"], src))
 
     # --- part 4: guard the no-label stance ------------------------------------
     parts.append(
         "Naming %s here is a statement about which reference samples the cohort is "
         "built from, not a group assignment for the patient.%s See "
         "ancestry_grouping_definition.why_no_label."
-        % (src, " It appears because using the all-panel baseline instead is what "
-                "produces the flattening signal above." if baseline_explains else ""))
+        % (src, " It is named because the patient's percentile drifts less across ranks "
+                "against %s than against the all-panel baseline." % src
+           if src_drift_smaller else ""))
 
-    return verdict, " ".join(parts)
+    return " ".join(parts)
 
 
-def _why_this_k(cohort, args, fit_verdict):
+def _why_this_k(cohort, args):
     """What the curve and composition measurements say about the k the provider chose.
 
     It does not say why k was chosen. That reason is the provider's and is recorded
@@ -1112,34 +1074,23 @@ def _why_this_k(cohort, args, fit_verdict):
              "provider's statement, recorded in k_rationale_stated_by_provider; this "
              "text does not supply one." % k]
     band = None
-    if fit_verdict == "centrality effect present":
-        parts.append(
-            "cohort_fit_note records a centrality effect, which compresses the distances "
-            "and makes them an untrustworthy basis for reading an elbow.")
-    elif fit_verdict != "no centrality effect detected":
-        parts.append(
-            "cohort_fit_note's verdict is %r, so the distance curve is not read for an "
-            "elbow here." % fit_verdict)
-    elif peak:
+    if peak:
         band = peak["band_within_95pct_of_peak"]
         at_edge = peak["rank"] in (peak["scan_range"][0], peak["scan_range"][1] - 1)
         d10 = slope.get("d10")
         parts.append(
-            "cohort_fit_note finds no centrality effect compressing the curve, so the "
-            "curve can be read. Its log-log slope %s a peak of %.3f at rank %d%s. Ranks "
-            "%d-%d are within 5%% of that peak."
+            "The distance curve's log-log slope %s a peak of %.3f at rank %d%s. Ranks "
+            "%d-%d are within 5%% of that peak. Whether the patient's position compresses "
+            "this curve is not judged here; cohort_fit_note carries the centrality and "
+            "curve-shape measurements that bear on it."
             % (("rises from %.3f at d10 to" % d10) if d10 is not None and d10 < peak["slope"]
                else "reaches",
                peak["slope"], peak["rank"],
-               " -- at the edge of the scanned range, so an edge effect rather than a "
-               "feature" if at_edge else
-               " and falls away after -- the rank where distance climbs fastest, which "
-               "is where the patient's local neighbourhood runs out",
+               " -- at the edge of the scanned range" if at_edge else
+               ", the rank where distance climbs fastest in the scanned range",
                band[0], band[1]))
     else:
-        parts.append(
-            "cohort_fit_note finds no centrality effect compressing the distance curve, "
-            "but no slope peak could be located in it.")
+        parts.append("No slope peak could be located in the distance curve.")
 
     if first_other is None:
         parts.append("Every measured rank is %s; no second superpopulation appears."
@@ -1195,6 +1146,17 @@ def _why_this_k(cohort, args, fit_verdict):
     return " ".join(parts)
 
 
+def _share_comparison(ms, n_top):
+    """The clause comparing the trailing PCs' share of squared distance inside the cohort
+    with panel-wide, worded as the two numbers actually order, or nothing if equal."""
+    w = ms["trailing_pc_share_of_squared_distance_within_cohort"]
+    p = ms["trailing_pc_share_of_squared_distance_panel_wide"]
+    if w == p:
+        return ""
+    return (", so PC%d and above carry %s of the squared distance inside the cohort than "
+            "across the panel" % (n_top + 1, "more" if w > p else "less"))
+
+
 def _d1_spread(by_sup):
     """max/min of the per-group median d1 -- the ratio baseline_frame_note quotes."""
     d1 = [v["d1"] for v in by_sup.values() if v.get("d1")]
@@ -1211,12 +1173,7 @@ def build_artifact(args, projection, request, s1, cohort, parity, score_stats,
     nd = cohort["neighbour_distances"]
     curve = cohort["distance_curve"]
 
-    # Decided once, up here, because both cohort_construction_rule.why_this_k and
-    # cohort_fit_note are written from it. The two contradicted each other in an
-    # earlier build -- why_this_k asserted a centrality effect that cohort_fit_note's
-    # own numbers no longer showed -- and sharing one verdict is what stops that
-    # recurring.
-    verdict, assessment = _fit_assessment(cohort)
+    assessment = _fit_assessment(cohort)
     first_other = cohort["curve_diagnostics"]["first_rank_of_a_second_superpopulation"]
     anc_group = (((request.get("patient") or {}).get("ancestry_grouping") or {})
                  .get("group"))
@@ -1310,20 +1267,17 @@ def build_artifact(args, projection, request, s1, cohort, parity, score_stats,
         "pcs_used": projection.get("pcs_used"),
         "distance_metric_note": (
             ("Euclidean distance over %d PCs weights every PC equally: the plink2 "
-             "eigenvector columns are all normalised to the same variance, so a PC "
-             "explaining almost nothing counts as much as one separating continents. "
-             "The %d leading PCs hold %.0f%% of the eigenvalue mass, and PC1 is %.0fx "
-             "PC%d -- yet inside the selected cohort those leading PCs do almost no "
-             "ordering work: PC%d and above carry %.1f%% of the squared distance "
-             "there, against %.1f%% panel-wide. At cohort scale the neighbours are "
-             "already alike on the PCs that carry ancestry, so what separates them is "
-             "the rest. This is a pre-existing property of the rule, unchanged by the "
-             "upstream scale fix."
+             "eigenvector columns are all normalised to the same variance, whatever "
+             "share of the variance each PC explains. The %d leading PCs hold %.0f%% of "
+             "the eigenvalue mass, and PC1's eigenvalue is %.0fx PC%d's. PC%d and above "
+             "carry a median %.1f%% of the squared distance within the selected cohort, "
+             "against %.1f%% panel-wide%s."
              % (projection.get("pcs_used"), ms_n_top, 100.0 * ms["leading_pc_eigenvalue_share"],
                 eigenvals[0] / eigenvals[-1], projection.get("pcs_used"),
                 ms_n_top + 1,
                 100.0 * ms["trailing_pc_share_of_squared_distance_within_cohort"],
-                100.0 * ms["trailing_pc_share_of_squared_distance_panel_wide"]))
+                100.0 * ms["trailing_pc_share_of_squared_distance_panel_wide"],
+                _share_comparison(ms, ms_n_top)))
             if ms else
             ("Euclidean distance over %d PCs weights every PC equally. The reference "
              "eigenvalues were not available to quantify how unevenly the variance is "
@@ -1400,7 +1354,7 @@ def build_artifact(args, projection, request, s1, cohort, parity, score_stats,
         "min_cohort_threshold": args.min_cohort,
         "max_kth_distance_threshold": args.max_kth_distance,
         "k_rationale_stated_by_provider": args.k_rationale,
-        "why_this_k": _why_this_k(cohort, args, verdict),
+        "why_this_k": _why_this_k(cohort, args),
         "neighbour_distances": {"d1": nd["d1"], "d10": nd["d10"],
                                 "d50": nd["d50"],
                                 "d%d" % nd["k_for_dk"]: nd["dk"]},
@@ -1428,8 +1382,6 @@ def build_artifact(args, projection, request, s1, cohort, parity, score_stats,
     # Neither is written in here, which is what the previous fixed strings did.
     rp = request.get("patient") or {}
     patient_assay = rp.get("assay_class")
-    assay_matched = bool(patient_assay) and (
-        args.reference_assay.strip().lower() == str(patient_assay).strip().lower())
     art["assay_layer"] = {
         "reference": args.reference_assay,
         "reference_stated_by": "the provider, via --reference-assay",
@@ -1443,19 +1395,19 @@ def build_artifact(args, projection, request, s1, cohort, parity, score_stats,
             "read_from": "the request's patient block, and the source column of the "
                          "dosages file",
         },
-        "assay_matched": assay_matched,
-        "assay_matched_rule": ("the stated reference assay equals the request's patient "
-                               "assay_class, ignoring case; anything else is reported as "
-                               "not matched"),
+        # Not decided here. One side is the provider's free text and the other the
+        # request's class token; whether they name the same assay layer is a judgment,
+        # and comparing the strings would make it by spelling.
+        "assay_matched": None,
+        "assay_matched_note": ("not decided by this tool; reference_adapter.py takes only "
+                               "a provider's own true/false here as a statement"),
         "statement": (
-            "The stated reference assay equals the patient's assay class."
-            if assay_matched else
-            "These are NOT assay-matched: the reference assay is stated as %r and the "
-            "patient's assay class is %r. INT-4 asks for a reference on the patient's "
-            "assay layer because a score from one layer placed against another "
-            "inherits the R1 imputed/partial-vs-complete bias. The mismatch is "
-            "disclosed rather than corrected. See also imputation_shrinkage_note."
-            % (args.reference_assay, patient_assay)),
+            "The reference assay is stated by the provider as %r; the patient's assay "
+            "class, from the request, is %r. INT-4 asks for a reference on the patient's "
+            "assay layer because a score from one layer placed against another inherits "
+            "the R1 imputed/partial-vs-complete bias. Whether these are the same layer is "
+            "not judged here, and nothing is corrected. See also "
+            "imputation_shrinkage_note." % (args.reference_assay, patient_assay)),
     }
 
     # same-resolved-set is a claim that the cohort was scored over exactly the variants
@@ -1472,6 +1424,7 @@ def build_artifact(args, projection, request, s1, cohort, parity, score_stats,
         "n_variants_plink2_used_for_reference": parity["n_reference_used"],
         "n_variants_patient_scoring_used": parity["n_patient_used"],
         "n_variants_in_patient_score_input_per_request": parity["n_patient_given"],
+        "plink2_version_patient_per_request": parity["plink2_patient"],
         "n_score_input_variants_not_scored_in_reference": parity["n_not_scored"],
         "sum_abs_beta_not_scored_in_reference": parity["sum_abs_beta_not_scored"],
         "not_scored_examples": parity["not_scored_examples"],
@@ -1506,9 +1459,10 @@ def build_artifact(args, projection, request, s1, cohort, parity, score_stats,
     art["imputation_shrinkage_note"] = {
         "statement": (
             ("%.4f of the patient's %.4f resolved |beta| (%.0f%%) comes from imputed "
-             "rather than directly typed positions. Imputation pulls those dosages "
-             "toward the reference panel's allele frequencies, which biases the "
-             "patient's percentile toward the centre of the distribution."
+             "rather than directly typed positions. Imputed dosages are expected values "
+             "from the imputation, not observed genotypes. Whether that moves this "
+             "patient's placement, in which direction and by how much, depends on how the "
+             "reference genotypes were produced (assay_layer) and is not measured here."
              % (s1["sum_abs_beta_imputed"], s1["sum_abs_beta"],
                 100.0 * s1["imputed_weight_fraction"]))
             if imputed_any else
@@ -1520,41 +1474,32 @@ def build_artifact(args, projection, request, s1, cohort, parity, score_stats,
                                     if s1["imputed_weight_fraction"] is not None else None),
         "n_variants_imputed": s1["n_variants_imputed"],
         "n_variants_typed": s1["n_variants_typed"],
-        "direction": ("toward the centre of the distribution" if imputed_any
-                      else "none: nothing was imputed"),
+        "direction": "not measured" if imputed_any else "none: nothing was imputed",
         "magnitude": "not measured" if imputed_any else "none",
         "status": "This is a disclosure, not a correction. No adjustment was applied.",
     }
 
     cen = cohort["centrality"]
-    effect_found = verdict != "no centrality effect detected"
     src = cohort["cohort_source_group"]
 
     art["cohort_fit_note"] = {
-        "finding": verdict,
+        "finding": ("not decided by this tool: the measurements are below, and no cutoff "
+                    "turns them into a verdict"),
         "statement": (
-            ("The patient's PC coordinates are more central than %.1f%% of the %d "
-             "reference samples: distance to the panel centroid is %.6f, against a "
-             "panel median of %.6f and a 5th percentile of %.6f. The cohort was "
-             "therefore selected around a point sitting near the centre of the "
-             "reference cloud, which makes the selected neighbours appear closer "
-             "than the patient's true genetic neighbourhood warrants."
-             if effect_found else
-             "The patient's PC coordinates sit at an ordinary distance from the "
-             "panel centroid: %.6f, with %.1f%% of the %d reference samples closer "
-             "to the centroid than the patient, against a panel median of %.6f and "
-             "a 5th percentile of %.6f. The cohort was not selected around an "
-             "unusually central point, and no centrality effect is disclosed here. "
-             "See `finding` and `shrinkage_vs_fit_assessment` for what was measured "
-             "to reach that.")
-            % ((cen["pct_of_panel_closer_to_centroid"], cohort["n_available"],
-                cen["patient_distance_to_centroid"],
-                cen["panel_median_distance_to_centroid"],
-                cen["panel_p5_distance_to_centroid"]) if effect_found else
-               (cen["patient_distance_to_centroid"],
-                cen["pct_of_panel_closer_to_centroid"], cohort["n_available"],
-                cen["panel_median_distance_to_centroid"],
-                cen["panel_p5_distance_to_centroid"]))),
+            "%.1f%% of the %d reference samples in the candidate pool are closer to the "
+            "panel centroid than the patient's PC coordinates. The patient's distance to "
+            "the centroid is %.6f, %s the panel median of %.6f (5th percentile %.6f). "
+            "Whether that position makes the selected neighbours closer than the patient's "
+            "genetic neighbourhood warrants is not decided here; "
+            "shrinkage_vs_fit_assessment sets out the measurements that bear on it."
+            % (cen["pct_of_panel_closer_to_centroid"], cohort["n_available"],
+               cen["patient_distance_to_centroid"],
+               ("below" if cen["patient_distance_to_centroid"]
+                < cen["panel_median_distance_to_centroid"] else
+                "above" if cen["patient_distance_to_centroid"]
+                > cen["panel_median_distance_to_centroid"] else "equal to"),
+               cen["panel_median_distance_to_centroid"],
+               cen["panel_p5_distance_to_centroid"])),
         "shrinkage_vs_fit_assessment": assessment,
         "centrality_measurement": cen,
         "curve_shape": cohort["curve_shape"],
@@ -1574,44 +1519,26 @@ def build_artifact(args, projection, request, s1, cohort, parity, score_stats,
             "answer different questions and can disagree sharply. The pool mixes "
             "groups whose own median d1 differs by %.2fx between the tightest and the "
             "loosest, so a patient near one group can drift across the all-panel "
-            "percentiles without anything about that patient changing. The per-group "
-            "figures are the ones the assessment reads; the all-panel figures are kept "
-            "because they are what any such drift shows up in."
+            "percentiles without anything about that patient changing. Both are "
+            "reported; the all-panel figures are what any such drift shows up in."
             % _d1_spread(cohort["reference_baseline_by_superpopulation"])),
         "cohort_source_group": src,
         "cohort_source_group_definition": (
             "The largest superpopulation among the selected neighbours (%s, %d of "
             "%d). It names which reference samples the cohort is built from, so the "
-            "fit assessment can be read against the right baseline. It is NOT a "
+            "measurements can be read against that group's own baseline. It is NOT a "
             "group assignment for the patient -- see "
             "ancestry_grouping_definition.why_no_label."
             % (src, cohort["superpopulation_counts"].get(src, 0),
                cohort["n_selected"])),
-        "direction": ("toward the centre of the distribution" if effect_found
-                      else "no directional effect detected"),
-        "magnitude": ("not measured" if effect_found else
-                      "measured and null; see centrality_measurement and curve_shape"),
-        "status": (("This is a disclosure, not a correction. No adjustment was "
-                    "applied to the patient's coordinates or to the cohort.")
-                   if effect_found else
-                   ("No disclosure is made. No adjustment was applied to the "
-                    "patient's coordinates or to the cohort, and none is called "
-                    "for by these measurements. The measurements are reported in "
-                    "full so the null result is checkable rather than asserted.")),
+        "direction": "not measured",
+        "magnitude": "not measured",
+        "status": ("A report of measurements, not a correction and not a verdict. No "
+                   "adjustment was applied to the patient's coordinates or to the cohort."),
         "combined_effect_with_imputation": (
-            ("This bias and imputation_shrinkage_note push the same way. Imputation "
-             "pulls the patient's SCORE toward the panel mean; projection shrinkage "
-             "pulls the COHORT SELECTION toward the panel centre. They act on "
-             "different quantities by different mechanisms, but both move the "
-             "resulting percentile toward the 50th. Neither is corrected here and "
-             "the combined magnitude is not measured.")
-            if effect_found else
-            ("Nothing here compounds with imputation_shrinkage_note. That note "
-             "stands on its own measurement and is unaffected by this one: it "
-             "concerns the patient's SCORE, this concerns COHORT SELECTION, and "
-             "only the score effect is present. Any downstream text that lists a "
-             "projection-shrinkage caveat alongside the imputation caveat is "
-             "carrying a caveat this artifact does not support.")),
+            "Not measured. This note concerns cohort selection and "
+            "imputation_shrinkage_note the patient's score; whether either moves the "
+            "placement, and how they combine, is not measured here."),
     }
 
     art["distribution"] = summarise(score_stats.get("scores_sum"))
@@ -1832,6 +1759,29 @@ def main():
         ("n_ref_vcf_samples_not_in_basis", len(in_vcf - set(iids))),
         ("self_check_ran_on", "every basis sample, before this restriction"),
     ])
+    # What the restriction did to THIS patient's neighbourhood, not only to the pool: of
+    # the k basis samples nearest the patient over the whole basis, how many have no
+    # genotypes and so cannot be cohort members, and how far the k-th nearest sits with
+    # and without them. Without this a reader can only reconstruct it by comparing
+    # self_check_pc_space with the selected cohort's counts.
+    if args.k >= 1 and len(iids):
+        d_full = np.linalg.norm(coords - patient_vecs[args.pc_source], axis=1)
+        order_full = np.argsort(d_full, kind="stable")
+        kk = min(args.k, len(iids))
+        dropped_set = set(dropped)
+        near_dropped = [i for i in order_full[:kk] if i in dropped_set]
+        nd_pop, nd_sup = counts_for(iids, labels, near_dropped)
+        pool["patient_neighbourhood_before_restriction"] = collections.OrderedDict([
+            ("k", kk),
+            ("n_of_the_k_nearest_basis_samples_without_genotypes", len(near_dropped)),
+            ("those_by_superpopulation", nd_sup),
+            ("those_by_population", nd_pop),
+            ("d_k_over_every_basis_sample", float(d_full[order_full[kk - 1]])),
+            ("note", "the k basis samples nearest the patient, by the same PC vector and "
+                     "distance as the cohort, over every basis sample before the pool "
+                     "restriction; d_k_over_the_candidate_pool is the same distance "
+                     "after it"),
+        ])
     print("  candidate pool              : %d of %d basis samples have genotypes in "
           "the reference VCF (%d VCF samples)" % (len(keep), len(iids), len(in_vcf)))
     if not keep:
@@ -1843,6 +1793,11 @@ def main():
     cohort = select_cohort(iids, coords, labels, patient_vecs[args.pc_source],
                            args.k, args.min_cohort, args.max_kth_distance,
                            eigenvals=eigenvals)
+    if "patient_neighbourhood_before_restriction" in pool:
+        pool["patient_neighbourhood_before_restriction"]["d_k_over_the_candidate_pool"] = (
+            cohort["neighbour_distances"]["dk"])
+        pool["patient_neighbourhood_before_restriction"]["k_for_d_k_over_the_candidate_pool"] = (
+            cohort["neighbour_distances"]["k_for_dk"])
     cohort["candidate_pool"] = pool
     cohort["ref_vcf"] = vh
     prov_path = args.ref_vcf + ".provenance.json"
@@ -1996,14 +1951,14 @@ def main():
 
     # The same profile against the group the cohort is drawn from. The all-panel
     # column above mixes groups of very different density and drifts on its own;
-    # this is the column the fit verdict is actually read off.
+    # this column is the patient against the group the cohort is mostly made of.
     src_g = cohort["cohort_source_group"]
     if src_g:
         print()
         print("    vs %s alone (%d of the %d selected neighbours) -- the baseline the"
               % (src_g, cohort["superpopulation_counts"].get(src_g, 0),
                  cohort["n_selected"]))
-        print("    cohort is drawn from, and the one the fit verdict is read off:")
+        print("    cohort is drawn from:")
         print("      " + "  ".join(
             "d%d %.1f%%" % (r, pct_by_sup[src_g]["d%d" % r])
             for r in BASELINE_RANKS if pct_by_sup[src_g].get("d%d" % r) is not None))
@@ -2049,6 +2004,7 @@ def main():
         "n_reference_used": None,
         "n_patient_used": rp.get("n_variants_in_score"),
         "n_patient_given": rp.get("n_variants_in_score_input"),
+        "plink2_patient": rp.get("plink2_version"),
         "n_not_scored": None, "sum_abs_beta_not_scored": None,
         "not_scored_examples": [], "log_lines": [], "allele_ct_min_max": None,
     }
@@ -2094,7 +2050,13 @@ def main():
         # same-resolved-set needs all of them; a failed one is named in the statement.
         sha_req = parity["score_input_sha256_in_request"]
         n_pu, n_pg = parity["n_patient_used"], parity["n_patient_given"]
+        pv_here = (plink2_version.splitlines() or [""])[0].strip()
+        pv_patient = (str(parity["plink2_patient"]).strip()
+                      if parity["plink2_patient"] is not None else None)
         checks = [
+            (pv_patient == pv_here,
+             "the patient was scored by %r, per the request, and the cohort by %r"
+             % (pv_patient, pv_here)),
             (sha_req is not None and sha_req == parity["score_input_sha256"],
              "the score input's sha256 %s is not the one the request names (%s)"
              % (parity["score_input_sha256"], sha_req)),
@@ -2119,9 +2081,9 @@ def main():
             parity["label"] = "same-resolved-set"
             parity["statement"] = (
                 "Reference individuals were scored from the patient's own score input, "
-                "by the recipe score_plink2.py scored the patient with, and every one of "
-                "its %d variants was used for the patient and for every cohort member."
-                % n_given)
+                "by the recipe score_plink2.py scored the patient with and the same plink2 "
+                "build, and every one of its %d variants was used for the patient and for "
+                "every cohort member." % n_given)
         else:
             parity["label"] = "other"
             parity["statement"] = (
