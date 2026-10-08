@@ -10,6 +10,7 @@ Two things it deliberately records that are not flattering: what the token grep 
 scan, and what the Spotlight index already contained before the run started.
 """
 import getpass
+import hashlib
 import json
 import os
 import platform
@@ -83,20 +84,51 @@ def host_facts():
 
 
 def source_revision():
-    """What the agent's source looked like, read by the harness -- never by the agent."""
-    def _git(*args):
+    """The commit this run launched from, and whether the tree matched it, read by the harness
+    at launch -- never by the agent.
+
+    Three things the previous version got wrong, each of which made a corpus impossible to
+    freeze from its own manifests: a git failure read as clean (bool(None) is False), an
+    untracked scratch file read as dirty, and a dirty tree recorded no trace of what differed.
+    So: dirty is True/False only when git answered, None when it did not; it counts tracked
+    changes, staged or not, and untracked files are listed separately; and a dirty tree
+    records its changed paths and the sha256 of `git diff HEAD`, which is enough to check a
+    reconstruction byte for byte."""
+    def _git(*args, raw=False):
         try:
-            r = subprocess.run(["git", "-C", config.AGENT] + list(args),
-                               capture_output=True, text=True, timeout=20)
-            return (r.stdout or "").strip() or None
+            r = subprocess.run(["git", "-C", config.PRODUCT_ROOT] + list(args),
+                               capture_output=True, timeout=20)
         except Exception:  # noqa: BLE001
             return None
+        if r.returncode != 0:
+            return None
+        # Not .strip(): porcelain lines start with a status column that may be a space.
+        return r.stdout if raw else r.stdout.decode(errors="replace").rstrip("\n")
+
+    head = _git("rev-parse", "HEAD")
+    tracked = _git("status", "--porcelain=v1", "--untracked-files=no")
+    untracked = _git("ls-files", "--others", "--exclude-standard")
+    diff = _git("diff", "HEAD", "--binary", raw=True) if tracked else None
+    changed = [line[3:] for line in tracked.splitlines() if line.strip()] if tracked else []
+    dirty = None if (head is None or tracked is None) else bool(changed)
     return {
-        "build_head": _git("rev-parse", "HEAD"),
-        "build_dirty": bool(_git("status", "--porcelain")),
-        "note": "Read by the harness for provenance. agent/.git is never staged and is on "
-                "the denial probe list -- its commit subject lines alone leak the prior "
-                "run's ancestry call.",
+        "repo_root": _git("rev-parse", "--show-toplevel"),
+        "commit": head,
+        "branch": _git("rev-parse", "--abbrev-ref", "HEAD"),
+        "tags_at_commit": (_git("tag", "--points-at", "HEAD") or "").split() if head else None,
+        "dirty": dirty,
+        "dirty_means": "tracked files differ from the commit, staged or not; untracked files "
+                       "are listed separately and do not count. null = git did not answer.",
+        "changed_paths": changed[:200],
+        "n_changed_paths": len(changed),
+        "diff_head_sha256": hashlib.sha256(diff).hexdigest() if diff else None,
+        "untracked_paths": untracked.splitlines()[:200] if untracked else [],
+        # Kept under their old names so earlier readers of the manifest still find them.
+        "build_head": head,
+        "build_dirty": dirty,
+        "note": "Read by the harness at launch, for provenance. The repository's .git is never "
+                "staged and is on the denial probe list -- its commit subject lines alone can "
+                "leak a prior run's ancestry call.",
     }
 
 
