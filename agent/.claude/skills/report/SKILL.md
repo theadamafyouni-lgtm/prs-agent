@@ -34,8 +34,10 @@ One structured output:
    show it. The quantity is `resolved_weight_fraction`, a top-level key of
    `runs/<RUN_ID>/score/coverage_<PGS>.json` (written by `tools/weight_coverage.py measure`). Read
    that **measured** file, not `select`'s `coverage_est_<PGS>.json` — estimate mode emits the same
-   key name for a pre-imputation, typed-only quantity, so pulling the wrong file understates
-   coverage to the person.
+   key name for a pre-imputation **upper bound** (typed weight plus every panel position counted as
+   if it imputed well), so pulling the wrong file overstates coverage to the person. The measured
+   file says `"resolved_weight_fraction_is": "measured_post_imputation"`; if yours does not, it is
+   the wrong file.
 
 ## A percentile is not a risk, and it does not sit still (`REP-3`)
 
