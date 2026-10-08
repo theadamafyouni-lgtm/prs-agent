@@ -111,14 +111,23 @@ current build, which is no longer the working box's (§8, "What is not reproduce
 
 ```bash
 apt install -y nodejs npm
-npm install -g @anthropic-ai/claude-code@2.1.224
-claude --version    # must print 2.1.224
+npm install -g @anthropic-ai/claude-code@2.1.293
+claude --version    # must print 2.1.293
 which -a claude     # must be ONE entry, and it must be the npm one
 ```
 
-**Pin the version and pin it after any sign-in.** Newer versions cannot open their
-scratch directory inside the sandbox, so every case dies in under a second with what
-reads like a permissions error. This is the single most expensive thing to get wrong.
+**Pin the version and pin it after any sign-in.** The September 2026 corpus (tag
+`eval-corpus-2026-09`) ran on 2.1.224 with `claude-opus-4-8`; some versions after that could
+not open their scratch directory inside the sandbox, so every case died in under a second
+with what read like a permissions error. The agent now runs on `claude-opus-5-5`, which needs
+2.1.280 or newer; 2.1.293 was checked inside the sandbox on 2026-10-08 (a door-only run and
+full runs). A run on it is a new experiment, not a reproduction of the corpus. This is still
+the single most expensive thing to get wrong.
+
+**The same symptom has a second cause.** A half-finished `npm install -g` of the CLI can
+leave `bin/claude.exe` as a 500-byte stub ("claude native binary not installed"); every case
+then dies with `execvp claude: Permission denied`. It happened on 2026-10-08. `claude
+--version` failing on the host is the tell, and `run_harness.py` now checks it before launch.
 
 **The pin is only as good as your `PATH`.** npm installs to `/usr/bin/claude`, and
 `/usr/local/bin` comes before `/usr/bin` on Ubuntu — so a second `claude` there silently
@@ -431,7 +440,7 @@ backup.
 
 ```bash
 cd harness && ./run_harness.py gate --persona p40      # stages everything, launches nothing
-cd harness && ./run_harness.py run  --persona p40 --model claude-opus-4-8
+cd harness && ./run_harness.py run  --persona p40 --model claude-opus-5-5
 ```
 
 The gate is free and catches a staging or scrub failure. The run costs tokens and is the

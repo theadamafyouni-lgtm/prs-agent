@@ -37,7 +37,7 @@
 # you a machine that is missing exactly two things and tells you what they are.
 
 set -u
-CLI_VERSION=2.1.224
+CLI_VERSION=2.1.293   # claude-opus-5-5 needs >= 2.1.280; the Sept 2026 corpus ran 2.1.224
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REFDATA="$REPO/agent/refdata"
 say(){ echo "==> $*"; }

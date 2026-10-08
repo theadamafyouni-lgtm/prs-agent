@@ -61,13 +61,14 @@ Then sign in, **in this order**:
 
 ```bash
 claude                                             # sign in, then /exit
-npm install -g @anthropic-ai/claude-code@2.1.224   # re-pin AFTER signing in
+npm install -g @anthropic-ai/claude-code@2.1.293   # re-pin AFTER signing in
 ```
 
 The order matters and is not the obvious one. Signing in silently upgrades the
-CLI, and newer versions cannot open their scratch directory inside the sandbox.
+CLI, and some versions cannot open their scratch directory inside the sandbox.
 Get it backwards and every case dies in under a second with a permissions error
-that is really a version error.
+that is really a version error. (2.1.293 is the version checked with the agent's
+model, `claude-opus-5-5`; the published corpus ran 2.1.224 with `claude-opus-4-8`.)
 
 `preflight.py` is the thing to run whenever something behaves strangely. Every
 environment problem we hit was silent: a missing Python package made the agent
