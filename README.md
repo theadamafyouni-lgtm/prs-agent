@@ -27,7 +27,9 @@ number anyway is the failure.
 
 A Linux machine. Ubuntu 22.04 or 24.04, 8 cores, 16 GB RAM, and **at least 95 GB
 of free disk**: rebuilding the reference data peaks near 78 GB, and each running case
-needs room of its own. A single case takes 25 to 40 minutes.
+needs room of its own (about 15 GB for a case that goes past select). A case through select
+takes 25 to 40 minutes; a full case, door to report, took 5 to 6 hours on an 8-core box in
+October 2026, about 3.5 hours of it imputation.
 
 You will also need a Claude account, because the agent under test is Claude Code
 running inside a sandbox.
@@ -91,7 +93,7 @@ The personas and the genotype files they point at are not in this repository. Th
 
 `--persona` needs an absolute path. `--stop-after select` runs the three stages
 this benchmark grades and stops before scoring, which is what makes a case take
-forty minutes instead of ten hours.
+forty minutes instead of five or six hours.
 
 ### What happens
 
