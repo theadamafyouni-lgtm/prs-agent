@@ -35,7 +35,7 @@ SANDBOXES = os.path.join(HARNESS_ROOT, "sandboxes")
 SANDBOX_TOOLS = os.path.join(HARNESS_ROOT, "sandbox_tools")
 
 # ---------------------------------------------------------------------------
-# The thirteen pipeline tools
+# The pipeline tools
 #
 # The other eleven files in agent/tools/ are analysis and build-time tools that no skill
 # invokes. They are excluded because they are not needed AND because they are the worst
@@ -52,6 +52,7 @@ PIPELINE_TOOLS = [
     "record.py",
     "ancestry.py",
     "pgs_catalog.py",
+    "chromosome_counts.py",
     "weight_coverage.py",
     "impute.py",
     "build_dr2_cohort.py",

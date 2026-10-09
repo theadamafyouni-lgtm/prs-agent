@@ -188,6 +188,10 @@ python3 tools/pgs_catalog.py --out runs/<RUN_ID>/select/dl_<PGS>.json \
 python3 tools/file_facts.py --input <the downloaded .txt.gz> \
     --out runs/<RUN_ID>/select/scorefile_facts_<PGS>.json
 
+# the model's rows per chromosome, and any autosome it has none on
+python3 tools/chromosome_counts.py --scorefile <the downloaded .txt.gz> \
+    --chr-col hm_chr --run <RUN_ID> --out runs/<RUN_ID>/select/chromosome_counts_<PGS>.json
+
 python3 tools/weight_coverage.py estimate \
     --scorefile <the downloaded .txt.gz> \
     --chr-col hm_chr --pos-col hm_pos --effect-weight-col <as the header actually names it> \
@@ -215,6 +219,11 @@ imputation actually runs. So it gives a bracket, not a number:
 `--imputed-contigs` is the set of chromosomes `score` will impute (the staged panel is chr1–22). A
 model position on any other contig counts as unresolved, typed or not, because `score` never sees
 it. Say "estimate" to the person, not "coverage".
+
+**Read `autosomes_with_zero_rows` in `chromosome_counts_<PGS>.json` and judge it yourself.** A
+chromosome the model has no rows on is in neither side of the coverage fraction, so no coverage
+figure, estimated or measured, will show the gap. The tool only counts; whether the gap matters
+for this trait and this person is your call, and the choice you record says what you decided.
 
 The gate is `SCO-8`'s two conditions:
 
