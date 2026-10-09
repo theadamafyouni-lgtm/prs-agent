@@ -32,13 +32,16 @@ One structured output:
 3. **A disclaimer** that it is not a certainty and not a diagnosis.
 4. **The covered-weight fraction** — how much of the score's weight was actually resolvable — as a
    **transparency control, not a correction applied to the number.** Do not adjust the score by it;
-   show it. The quantity is `resolved_weight_fraction`, a top-level key of
+   show it. A position is resolved if it was typed on the chip and carried through scoring, or
+   imputed at or above the DR2 bar; a typed position the imputation panel lacks never reaches the
+   score and counts as unresolved. The quantity is `resolved_weight_fraction`, a top-level key of
    `runs/<RUN_ID>/score/coverage_<PGS>.json` (written by `tools/weight_coverage.py measure`). Read
    that **measured** file, not `select`'s `coverage_est_<PGS>.json` — estimate mode emits the same
-   key name for a pre-imputation **upper bound** (typed weight plus every panel position counted as
-   if it imputed well), so pulling the wrong file overstates coverage to the person. The measured
-   file says `"resolved_weight_fraction_is": "measured_post_imputation"`; if yours does not, it is
-   the wrong file.
+   key name for a pre-imputation **upper bound** (the weight typed at positions `score` carries,
+   plus every pending panel position counted as if it imputed at or above the bar), so pulling the
+   wrong file overstates coverage to the person. The measured file says
+   `"resolved_weight_fraction_is": "measured_post_imputation"`; if yours does not, it is the wrong
+   file.
 
 ## A percentile is not a risk, and it does not sit still (`REP-3`)
 

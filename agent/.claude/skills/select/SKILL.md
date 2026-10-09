@@ -202,10 +202,13 @@ python3 tools/weight_coverage.py estimate \
 it sees weight sitting on positions missing from the patient's file, but it cannot see r²/INFO until
 imputation actually runs. So it gives a bracket, not a number:
 
-- `resolved_weight_fraction` is the **upper bound**: directly typed weight plus the weight on panel
-  positions pending imputation, as if every one of them imputed at or above the bar. `score` can
-  only measure less (r², the palindromic policy and allele checks all take weight away, never add
-  it).
+- `resolved_weight_fraction` is the **upper bound**. A position is *resolved* if it is typed on the
+  chip and carried through scoring, or imputed at or above the DR2 bar. `score` carries a typed
+  genotype only at a panel position on a chromosome it imputes, so a typed position the panel
+  lacks counts as unresolved. The bound is the weight typed at positions `score` carries plus the
+  weight on panel positions pending imputation, as if every one of them imputed at or above the
+  bar. `score` can only measure less (r², the palindromic policy and allele checks all take weight
+  away, never add it).
 - `resolved_weight_fraction_typed_only` is the figure with no imputation at all. Show it, and name
   the gap between the two as what this choice depends on imputation for. Do not gate on it.
 

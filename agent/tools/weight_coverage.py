@@ -6,9 +6,13 @@ The metric, from prd §3:
     unresolved-weight fraction = sum|beta| over unresolved positions
                                / sum|beta| over all model positions
 
-and a position is **resolved** if it is directly typed and passes QC, or imputed at or above
-the r-squared bar. Summed |beta|, not beta^2 * 2p(1-p): the |beta| form is the individual-
-instability quantity, because an unresolved locus can move THIS person's score by up to 2|beta|.
+and a position is **resolved** if it is typed on the chip and carried through scoring, or
+imputed at or above the DR2 bar. Carried through scoring means the called genotype reaches the
+score: score carries a typed position only where the imputation panel holds it, on a chromosome
+score imputes, and only past the allele and palindrome checks. A typed position the panel lacks
+has no route into the score, so it is unresolved. Summed |beta|, not beta^2 * 2p(1-p): the
+|beta| form is the individual-instability quantity, because an unresolved locus can move THIS
+person's score by up to 2|beta|.
 The variance form is the population lens, and it drives a rare high-|beta| variant's weight
 toward zero as p -> 0 -- under-counting exactly the variant that swings one individual.
 
@@ -192,7 +196,7 @@ def summarise(mode, buckets, total_abs, high_beta_fraction, top_loci):
     high = loci_at_or_above("unresolved")
     out = {
         "total_abs_beta": total_abs,
-        "resolved_abs_beta": resolved,              # estimate: directly typed only
+        "resolved_abs_beta": resolved,              # estimate: typed where score carries it
         "pending_imputation_abs_beta": pending,     # measure: always 0
         "unresolved_abs_beta": unresolved,          # estimate: no route can reach it
         # THE GATED FRACTION. estimate: upper bound (typed + pending). measure: measured.
@@ -363,8 +367,9 @@ def main():
         "metric": "summed |beta| fraction (R9 / prd §3); NOT beta^2*2p(1-p)",
         "mode_caveat": (
             "ESTIMATE, pre-imputation (SEL-11). resolved_weight_fraction here is an UPPER BOUND: "
-            "directly typed weight plus weight pending imputation in the panel, as if every "
-            "pending position imputes at or above the bar. score's measured fraction cannot "
+            "weight typed on the chip at positions score carries (in the panel, on an imputed "
+            "contig) plus weight pending imputation in the panel, as if every pending position "
+            "imputes at or above the DR2 bar. score's measured fraction cannot "
             "exceed it, so below the floor here the model cannot pass at score; at or above it, "
             "it only might. resolved_weight_fraction_typed_only is the no-imputation figure: "
             "shown, not gated. high_beta_unresolved_loci holds only loci no route can resolve; "
