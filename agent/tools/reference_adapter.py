@@ -14,8 +14,9 @@ Exit codes:
   0  reference present and valid; `placement` carries the counts
   3  reference_unavailable  -- no artifact supplied or file missing
   4  reference_invalid      -- artifact present but fails the contract, contradicts itself, is
-                               for a different model or score input than the request, or holds
-                               raw scores with missing genotypes scored as zero dosage; also
+                               for a different model or score input than the request, holds
+                               raw scores with missing genotypes scored as zero dosage, or lacks
+                               the allele counts that would show it does not; also
                                request_missing / request_invalid when the request itself cannot
                                be checked against
   5  reference_unusable     -- provider itself reports usable=false (INT-2 refusal, a CORRECT outcome)
@@ -75,6 +76,11 @@ def _finite(x):
     """A real number, not a bool and not NaN or infinite."""
     return (isinstance(x, (int, float)) and not isinstance(x, bool)
             and math.isfinite(x))
+
+
+def _count(x):
+    """An integer, not a bool and not a float that happens to be whole."""
+    return isinstance(x, int) and not isinstance(x, bool)
 
 
 def main():
@@ -213,11 +219,22 @@ def main():
     # With no-mean-imputation a missing genotype call is scored as zero dosage. A cohort
     # member with fewer than two alleles counted at every variant plink2 used therefore has
     # a raw score with filled values in it -- absence scored as a genotype -- whatever the
-    # label says.
+    # label says. The two counts are the only evidence that this did not happen, so both are
+    # required: an artifact without them, or with either in another shape, shows nothing
+    # about missing calls and is refused rather than read as having none.
     ac = detail.get("reference_allele_ct_min_max")
     used_ref = detail.get("n_variants_plink2_used_for_reference")
-    if (isinstance(ac, list) and len(ac) == 2 and isinstance(used_ref, int)
-            and not isinstance(used_ref, bool) and ac != [2 * used_ref, 2 * used_ref]):
+    if not (_count(used_ref) and used_ref > 0):
+        blocked(args.run, args.out, 4, "reference_invalid",
+                f"scoring_parity_detail.n_variants_plink2_used_for_reference must be a positive "
+                f"integer, the variants plink2 used for the cohort; got {used_ref!r}. Without "
+                f"it nothing shows whether missing cohort genotypes were scored as zero dosage")
+    if not (isinstance(ac, list) and len(ac) == 2 and all(_count(v) for v in ac)):
+        blocked(args.run, args.out, 4, "reference_invalid",
+                f"scoring_parity_detail.reference_allele_ct_min_max must be two integers, the "
+                f"least and greatest ALLELE_CT across the cohort; got {ac!r}. Without it "
+                f"nothing shows whether missing cohort genotypes were scored as zero dosage")
+    if ac != [2 * used_ref, 2 * used_ref]:
         blocked(args.run, args.out, 4, "reference_invalid",
                 f"reference ALLELE_CT runs {ac[0]} to {ac[1]} where {2 * used_ref} means every "
                 f"call present at the {used_ref} variants plink2 used: some cohort genotypes "
@@ -226,7 +243,9 @@ def main():
     if ref.get("scoring_parity") == "same-resolved-set":
         # The claim is that the cohort was scored from the patient's own score input and that
         # plink2 used every one of its variants on both sides. The hash and the counts are
-        # how that is checked rather than taken.
+        # how that is checked rather than taken, so each count must be present and an
+        # integer: a null, a float or a boolean that happens to compare equal is not one.
+        # The allele counts above hold for this label too.
         if not want_sha or got_sha != want_sha:
             blocked(args.run, args.out, 4, "reference_invalid",
                     f"scoring_parity is same-resolved-set but the artifact's score input "
@@ -239,10 +258,10 @@ def main():
                 detail.get("n_variants_in_score_input"),
             "scoring_parity_detail.n_variants_plink2_used_for_reference": used_ref,
         }
-        bad = {k: v for k, v in counts.items() if v != n_in}
+        bad = {k: v for k, v in counts.items() if not _count(v) or v != n_in}
         not_scored = detail.get("n_score_input_variants_not_scored_in_reference")
-        if (not isinstance(n_in, int) or isinstance(n_in, bool) or n_in < 1 or bad
-                or not_scored != 0):
+        if (not _count(n_in) or n_in < 1 or bad
+                or not _count(not_scored) or not_scored != 0):
             blocked(args.run, args.out, 4, "reference_invalid",
                     f"scoring_parity is same-resolved-set, which needs every count to equal "
                     f"the request's n_variants_in_score_input ({n_in!r}) and no score-input "

@@ -90,16 +90,23 @@ far end of that bias. So the provider must declare one of:
   `score_input_sha256`, `scoring_parity_detail.n_variants_in_score_input` and
   `n_variants_plink2_used_for_reference` and the request's `n_variants_in_score` all equal the
   request's `n_variants_in_score_input`, and
-  `n_score_input_variants_not_scored_in_reference` is 0; the adapter refuses the claim otherwise.
+  `n_score_input_variants_not_scored_in_reference` is 0, every one of them an integer; the
+  adapter refuses the claim otherwise, a missing or null count included. The allele counts
+  below are required for this label too.
 - `full-model-set` — reference scored over all model positions. **Then the percentile carries the
   R1 bias and the report must say so**, quantified if possible.
 - `other` — described, in `scoring_parity_detail.statement`, with the counts: for example the
   reference scored from the patient's score input but plink used fewer of its variants there
   than for the patient. The percentile carries a bias of the same kind and the report says so.
 
-Whatever the label, two things make the artifact invalid rather than biased, and the adapter
-refuses it: a `scoring_parity_detail.score_input_sha256` that is not the request's (the cohort
-was scored from some other file), and a `reference_allele_ct_min_max` other than twice
+Whatever the label, a usable artifact must carry, in `scoring_parity_detail`,
+`n_variants_plink2_used_for_reference` (a positive integer) and `reference_allele_ct_min_max`
+(two integers: the least and greatest per-sample `ALLELE_CT`). They are the only evidence of
+whether cohort genotypes were missing, so an artifact without either, or with either null or
+in another shape, is refused rather than read as having none missing. And two things make the
+artifact invalid rather than biased, and the adapter refuses it: a
+`scoring_parity_detail.score_input_sha256` that is not the request's (the cohort was scored
+from some other file), and a `reference_allele_ct_min_max` other than twice
 `n_variants_plink2_used_for_reference` at both ends (some cohort genotypes were missing, and
 `no-mean-imputation` scored them as zero dosage — absence filled in as a genotype).
 
