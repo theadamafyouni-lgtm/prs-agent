@@ -106,6 +106,10 @@ along the way; this says how it ended. Write it whatever the ending was — a sc
 a stop, a session the person ended, or a run configured to stop after a named stage. A run
 that ends early still ends, and still writes one.
 
+One ending writes none: a reference provider that never answers, or whose build fails. That is
+the environment failing, not an outcome, so `interpret` says why and ends the run without a
+result, and the harness, which ran the provider, records the run as an environment failure.
+
 One case where "last" moves, and your brief will say so when it applies: **a run told to stop
 after a named stage writes the result the moment that stage concludes**, ahead of writing the
 stage's own judgment, rather than waiting for an ending it will never arrive at. Follow the

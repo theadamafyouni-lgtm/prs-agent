@@ -158,8 +158,10 @@ python3 tools/reference_adapter.py --run <RUN_ID> \
 ```
 
 Without `--reference` it exits 3, `reference_unavailable`. With an artifact that fails any check
-above it exits 4, `reference_invalid`. A provider refusal exits 5, `reference_unusable`. In each
-case `interpret` records a **blocked** state or the refusal; it does not fall back to anything.
+above it exits 4, `reference_invalid`. A provider refusal exits 5, `reference_unusable`, and
+`interpret` records the refusal. On 3 or 4 the provider has failed rather than refused:
+`interpret` says why and ends the run without a result, and the harness records the run as an
+environment failure. In no case does it fall back to anything.
 
 On exit 0 the response carries `placement`: `n`, and how many of the `n` raw scores are below,
 equal to and above the patient's raw score. Counts, by exact comparison of the numbers as given,

@@ -65,8 +65,10 @@ and repeat it while it exits 6, which means still running. Give each such Bash c
 provider has answered it
 prints the path where the provider's artifact landed, which you then pass to
 `tools/reference_adapter.py --reference <that path>`. It may instead report that no usable
-reference could be built, or that none was supplied. Both are outcomes the contract provides
-for. Do not work around either. The person can still be asked questions while you wait.
+reference could be built for this person: that is the provider's refusal, an outcome the
+contract provides for. If nothing comes back, or nothing usable, the provider has failed, which
+is not an outcome at all; the interpret skill says what to do. Do not work around either. The
+person can still be asked questions while you wait.
 
 ## Two things about this environment that differ from the skill text
 
@@ -865,6 +867,79 @@ def environment_failure_reason(rc, stdout, stderr, messages_routed):
         return ("the agent exited %s having routed no messages at all, which is a run that "
                 "died before it said anything" % rc)
     return None
+
+
+# ---------------------------------------------------------------------------
+# Did the reference provider answer?
+#
+# A provider that never answers, or whose build fails, is the environment failing as well,
+# not a judgment: none of score, refuse or stop describes it, so the agent is told to say why
+# and end the run without a result (interpret/SKILL.md), and no outcome is added for it. The
+# harness ran the provider and knows what came back, so the call is the harness's, made from
+# its own record of every handoff and never from anything the agent wrote.
+#
+# A provider that answered with a refusal -- a well-formed artifact saying no usable group
+# could be built for this person -- did answer. That is INT-2's refusal, a correct outcome,
+# and the run is filed like any other.
+# ---------------------------------------------------------------------------
+
+def provider_blocked_reason(int1, result_valid):
+    """Why the reference provider left this run without an answer, or None.
+
+    Blocked means three things together. The agent asked for a reference. Nothing arrived that
+    passes the INT-1 contract -- neither a reference nor the provider's own refusal -- judged
+    by reference_adapter.py's verdict on the delivered bytes, which _contract_check keeps on
+    each handoff. And the run ended without a valid result.
+
+    Not the provider's: a request refused because it named a path outside the agent's own run
+    is the agent's to rebuild, and a run that ends there is a finding. Nor a run that reached
+    a valid result anyway -- a session the person ended while the reference was being built,
+    or a placement made with no reference at all -- because that run concluded something, and
+    it is filed and graded on what it concluded.
+
+    The asymmetry is environment_failure_reason's: a delivered artifact the harness could not
+    check counts as not usable, because a false positive costs one re-run.
+    """
+    if result_valid:
+        return None
+    blocked = []
+    for h in (int1 or {}).get("handoffs") or []:
+        res = h.get("result") if isinstance(h.get("result"), dict) else {}
+        staging = h.get("staging")
+        if res.get("status") == "error" and (
+                not isinstance(staging, dict) or staging.get("refused_path")):
+            continue
+        check = res.get("contract_check") if isinstance(res.get("contract_check"), dict) else {}
+        if res.get("status") in ("delivered", "unusable") and check.get("adapter_exit") in (0, 5):
+            return None
+        blocked.append((res, check))
+    if not blocked:
+        return None
+
+    res, check = blocked[-1]
+    status = res.get("status")
+    if status in ("delivered", "unusable"):
+        if check.get("adapter_exit") is None:
+            what = ("the provider's artifact could not be checked against the INT-1 contract "
+                    "(%s)" % (check.get("error") or "no verdict recorded"))
+        else:
+            what = ("the provider's artifact fails the INT-1 contract (reference_adapter.py "
+                    "exit %s): %s" % (check.get("adapter_exit"), check.get("detail")))
+    elif status == "unavailable":
+        what = "the provider sent back nothing the harness could read: %s" % res.get("reason")
+    elif status == "stopped_at_finish":
+        what = ("the provider had not answered when the agent's run ended, and was stopped "
+                "(provider exit %s)" % res.get("provider_rc"))
+    elif status == "not_started_at_finish":
+        what = "the agent's run ended before the provider started"
+    elif status == "error":
+        what = "the request was not answered: %s" % res.get("reason")
+    elif (int1 or {}).get("provider_still_running_at_finish"):
+        what = "the provider was still running when the agent's run ended"
+    else:
+        what = "the request never completed: %s" % (
+            "; ".join((int1 or {}).get("routing_errors") or []) or "no reason recorded")
+    return "provider blocked: %s" % what
 
 
 class Orchestrator:
@@ -1745,9 +1820,22 @@ class Orchestrator:
             with self._int1_lock:
                 entry["result"] = {"status": "not_started_at_finish"}
             return
-        rc, out, err, rec = agent.run(
-            handoff.brief(), timeout=config.TIMEOUT_PROVIDER,
-            log_path=os.path.join(self.vault_dir, "provider.jsonl"), new_session=True)
+        try:
+            rc, out, err, rec = agent.run(
+                handoff.brief(), timeout=config.TIMEOUT_PROVIDER,
+                log_path=os.path.join(self.vault_dir, "provider.jsonl"), new_session=True)
+        except Exception as exc:  # noqa: BLE001
+            # A provider that ran out its time or could not be run at all never answered.
+            # Said on this handoff, where provider_blocked_reason reads it, before work()
+            # replies to the agent with the same exception. A timeout's own text opens with
+            # the whole argv, brief included, so it is said in its own words instead.
+            why = ("no answer within %s s" % exc.timeout
+                   if isinstance(exc, subprocess.TimeoutExpired) else str(exc)[:500])
+            with self._int1_lock:
+                entry["result"] = {"status": "error",
+                                   "reason": "the provider did not finish: %s: %s"
+                                             % (type(exc).__name__, why)}
+            raise
         self.manifest.agent("provider", invocations=agent.invocations)
         if self._finishing.is_set():
             # finish() stopped this provider because the PRS agent had already exited.
@@ -1769,10 +1857,13 @@ class Orchestrator:
 
         delivery = handoff.deliver_to(os.path.realpath(self.prs_root), self.run_id)
         dest = delivery["to"]
-        # The artifact is copied and hashed at both ends. It is not validated here --
-        # reference_adapter.py is what validates it against the contract, and pre-empting
-        # that would move a judgment out of the pipeline and into the harness. Not even its
-        # being an object: a non-object is delivered and the adapter says what it is.
+        # The artifact is copied and hashed at both ends. It is not validated before it is
+        # delivered -- reference_adapter.py is what validates it against the contract, and
+        # pre-empting that would move a judgment out of the pipeline and into the harness.
+        # Not even its being an object: a non-object is delivered and the adapter says what
+        # it is. The harness keeps the adapter's verdict on the same bytes for its own record
+        # (_contract_check), which reaches the agent by no route.
+        check = self._contract_check(req_bytes, handoff.artifact_bytes, msg["message_id"])
         if not isinstance(art, dict):
             art = {}
         usable = art.get("usable")
@@ -1782,7 +1873,7 @@ class Orchestrator:
                 "usable": usable, "reason": art.get("reason"),
                 "n_participants": art.get("n_participants"),
                 "source": art.get("source"), "delivery": delivery,
-                "provider_rc": rc,
+                "provider_rc": rc, "contract_check": check,
             }
         self.transcript.append(
             direction="provider->agent",
@@ -1798,6 +1889,40 @@ class Orchestrator:
         else:
             self._reply(inbox, msg["message_id"],
                         {"status": "delivered", "artifact_path": rel})
+
+    def _contract_check(self, request_bytes, artifact_bytes, message_id):
+        """reference_adapter.py's verdict on a delivered artifact, for the harness's record.
+
+        The run is not changed by it: the artifact is delivered as it came, and the agent
+        runs the same adapter and acts on its own answer. The harness keeps the verdict so
+        that at the end it knows whether a usable artifact ever arrived
+        (provider_blocked_reason) without reading anything the agent wrote. The request and
+        artifact bytes it checks, and the adapter's output, go to the vault; the adapter runs
+        without --run, so no ledger is touched.
+        """
+        stem = os.path.join(self.vault_dir, "int1", message_id)
+        try:
+            os.makedirs(os.path.dirname(stem), exist_ok=True)
+            for suffix, data in ((".request.json", request_bytes),
+                                 (".artifact.json", artifact_bytes)):
+                with open(stem + suffix, "wb") as fh:
+                    fh.write(data)
+            p = subprocess.run(
+                [sys.executable, os.path.join(config.AGENT, "tools", "reference_adapter.py"),
+                 "--request", stem + ".request.json", "--reference", stem + ".artifact.json",
+                 "--out", stem + ".adapter.json"],
+                capture_output=True, text=True, timeout=300)
+        except (OSError, TypeError, subprocess.SubprocessError) as exc:
+            return {"adapter_exit": None, "error": "%s: %s" % (type(exc).__name__, exc)}
+        rec = {"adapter_exit": p.returncode, "output": stem + ".adapter.json"}
+        try:
+            with open(stem + ".adapter.json") as fh:
+                verdict = json.load(fh)
+            rec["status"] = verdict.get("status")
+            rec["detail"] = (str(verdict.get("detail") or "")[:1000]) or None
+        except (OSError, ValueError, AttributeError):
+            rec["stderr_tail"] = (p.stderr or "")[-1000:]
+        return rec
 
     def _check_unclaimed_request(self):
         """After the run: did the agent write a request and never hand it over?
@@ -2453,13 +2578,17 @@ class Orchestrator:
 
         From the manifest rather than from the local variables in _run, so the check sees
         exactly what a reader of the manifest sees and the two cannot come to different
-        conclusions about the same run.
+        conclusions about the same run. The agent's CLI is checked first, then the reference
+        provider: a run whose CLI never started also never reached a provider.
         """
         outcome = self.manifest.data.get("outcome") or {}
         transcript = self.manifest.data.get("transcript") or {}
-        return environment_failure_reason(
-            outcome.get("prs_returncode"), outcome.get("prs_stdout_tail"),
-            outcome.get("prs_stderr_tail"), transcript.get("n_messages"))
+        result = self.manifest.data.get("result") or {}
+        return (environment_failure_reason(
+                    outcome.get("prs_returncode"), outcome.get("prs_stdout_tail"),
+                    outcome.get("prs_stderr_tail"), transcript.get("n_messages"))
+                or provider_blocked_reason(self.manifest.data.get("int1"),
+                                           result.get("valid")))
 
     def publish(self):
         """File this run's four small artifacts under results/, and never let that fail a run.
@@ -2507,9 +2636,10 @@ class Orchestrator:
         directory first.
 
         A RUN THE ENVIRONMENT STOPPED IS NOT FILED AT ALL. See
-        environment_failure_reason(): a bad result from a run that happened is a finding
-        and belongs here; a run that never happened is a case still waiting to be tried,
-        and filing it is what would stop it from ever being tried again.
+        environment_failure_reason() and provider_blocked_reason(): a bad result from a run
+        that happened is a finding and belongs here; a run that never happened, or that a
+        reference provider left with nothing to place the score against, is a case still
+        waiting to be tried, and filing it is what would stop it from ever being tried again.
         """
         rec = {"published": False, "arm": self.arm, "pass": self.pass_name,
                "case_id": None, "dest": None, "files": [],

@@ -74,8 +74,8 @@ You can still ask the person questions while it runs. Send one reference request
 |---|---|---|
 | 6 | still running | run `await-reference` again |
 | 0 | the provider answered; the artifact's path is printed | pass that path to the adapter below |
-| 3 | no usable reference could be built, or none was supplied | if a path is printed after the message, pass it to the adapter, which records the refusal; if not, run the adapter without `--reference` |
-| 5 | the harness did not hand the request over, or replied with something unexpected; the reason is printed | not a reference outcome. If it says a request is already being built, it prints that request's id: collect that one with `await-reference --id <it>`. If the reason says a path is not inside your run, the request named a file it should not have — rebuild it from this run's own files. Otherwise record the stage `blocked` with the printed reason |
+| 3 | no usable reference could be built, or none was supplied | if a path is printed after the message, pass it to the adapter, which records the refusal; if not, the provider sent nothing back: see *If the provider fails* below |
+| 5 | the harness did not hand the request over, or replied with something unexpected; the reason is printed | not a reference outcome. If it says a request is already being built, it prints that request's id: collect that one with `await-reference --id <it>`. If the reason says a path is not inside your run, the request named a file it should not have — rebuild it from this run's own files. Otherwise the provider was not reached or did not finish: see *If the provider fails* below, with the printed reason |
 | 4 | only from the blocking form (without `--no-wait`): nobody replied in time | the request is still being built and its id is printed; collect it with `await-reference --id <it>` rather than sending another |
 
 Then validate what came back. **This is the only thing that reads the artifact for you:**
@@ -91,8 +91,18 @@ python3 tools/reference_adapter.py --run <RUN_ID> \
 |---|---|---|
 | 0 | a usable reference was built, for this model and this score input | go to §3 |
 | 5 | the provider could not build a usable one | **`INT-2`'s refusal, a correct outcome** (`JC-6`). Record `refuse` with the provider's reason and the participant count, and hand to `report`, which still has something honest to say |
-| 4 | the artifact fails the contract, contradicts itself, or is not for this request: a different model or scoring file, a different score input from yours, counts that do not support the parity it claims, reference scores with missing genotypes filled as zero dosage, or malformed numbers | the adapter has written a `blocked` ledger entry with the detail. **Use no number from the artifact.** Leave the stage's judgment unmade and say why; this is not the provider refusing and not `stop` |
-| 3 | no artifact was supplied | the adapter has written a `blocked` ledger entry. Leave the stage's judgment unmade, because none was made. **Do not record `stop`** — the data is not broken |
+| 4 | the artifact fails the contract, contradicts itself, or is not for this request: a different model or scoring file, a different score input from yours, counts that do not support the parity it claims, reference scores with missing genotypes filled as zero dosage, or malformed numbers | **Use no number from the artifact.** The provider's build failed: see *If the provider fails* below, with the adapter's detail. This is not the provider refusing and not `stop` |
+| 3 | no artifact was supplied | the provider sent nothing back: see *If the provider fails* below. **Do not record `stop`** — the data is not broken |
+
+**If the provider fails.** A provider that did not finish, sent nothing back or sent an artifact
+that fails the contract, and a request the harness could not hand over for any reason other than
+a path outside your run: each is the environment failing, not a judgment, and none of
+`score`, `refuse` or `stop` describes it. It is not `INT-2`'s refusal either, which is the provider
+answering, with its reason, that no usable group can be built for this person. So do not guess an
+outcome. Record no judgment for this stage, write no `result.json`, and use no number from any
+artifact. Say why in plain words in your final message, giving the reason the client or the
+adapter printed, and end the run. The harness ran the provider: it records the run as an
+environment failure from its own record of what came back, and files nothing as a result.
 
 ## 3. Place the score, and carry the caveats forward
 

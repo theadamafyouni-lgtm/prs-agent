@@ -831,6 +831,11 @@ class ProviderHandoff:
         self._artifact_bytes = data
         return art, None
 
+    @property
+    def artifact_bytes(self):
+        """The bytes read_artifact() read, which are the bytes deliver_to() writes."""
+        return self._artifact_bytes
+
     def deliver_to(self, prs_real, run_id):
         """Write the artifact into runs/<RUN>/interpret/provider_reference.json, and hash
         both ends.
