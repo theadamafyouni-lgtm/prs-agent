@@ -108,13 +108,16 @@ def source_revision():
 
     Three things the previous version got wrong, each of which made a corpus impossible to
     freeze from its own manifests: a git failure read as clean (bool(None) is False), an
-    untracked scratch file read as dirty, and a dirty tree recorded no trace of what differed.
-    So: dirty is True/False only when git answered, None when it did not; it counts tracked
-    changes, staged or not, and untracked files are listed separately; and a dirty tree
-    records its changed paths and the sha256 of `git diff HEAD`. The diff's format is pinned
-    (no external diff, no textconv, no colour, no rename detection, fixed prefixes, full
-    index lines) so the hash depends on the tree, not on whoever's git config ran it. Any git
-    call that failed is named in git_errors and its field is null, never an empty answer."""
+    untracked scratch file was indistinguishable from a changed tracked file, and a dirty tree
+    recorded no trace of what differed. So: build_dirty keeps its original meaning, any
+    `git status --porcelain` output with untracked files included, so it still compares with
+    every earlier manifest; tracked_dirty counts tracked changes only, staged or not, with
+    untracked files listed separately; both are True/False only when git answered and both are
+    None when any of their git calls failed; and a dirty tree records its changed paths and
+    the sha256 of `git diff HEAD`. The diff's format is pinned (no external diff, no textconv,
+    no colour, no rename detection, fixed prefixes, full index lines) so the hash depends on
+    the tree, not on whoever's git config ran it. Any git call that failed is named in
+    git_errors and its field is null, never an empty answer."""
     errors = []
 
     def _git(*args, raw=False):
@@ -155,7 +158,12 @@ def source_revision():
                     "--no-color", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/",
                     "--full-index", "--binary", "HEAD", raw=True)
     tags = _git("tag", "--points-at", "HEAD") if head else None
-    dirty = None if (head is None or tracked is None) else bool(changed)
+    # The original build_dirty check, untracked files included. The mode is passed rather than
+    # left to status.showUntrackedFiles, which would otherwise decide it per machine.
+    porcelain = _git("status", "--porcelain", "--untracked-files=normal")
+    answered = head is not None and tracked is not None and porcelain is not None
+    tracked_dirty = bool(changed) if answered else None
+    build_dirty = bool(porcelain) if answered else None
     root = _git("rev-parse", "--show-toplevel")
     branch = _git("rev-parse", "--abbrev-ref", "HEAD")
     return {
@@ -163,9 +171,10 @@ def source_revision():
         "commit": head,
         "branch": branch.strip() if branch else None,
         "tags_at_commit": tags.split() if tags is not None else None,
-        "dirty": dirty,
-        "dirty_means": "tracked files differ from the commit, staged or not; untracked files "
-                       "are listed separately and do not count. null = git did not answer.",
+        "tracked_dirty": tracked_dirty,
+        "tracked_dirty_means": "tracked files differ from the commit, staged or not; untracked "
+                               "files are listed separately and do not count. null = git did "
+                               "not answer.",
         "changed_paths": changed[:200] if tracked is not None else None,
         "n_changed_paths": len(changed) if tracked is not None else None,
         "diff_head_sha256": hashlib.sha256(diff).hexdigest() if diff else None,
@@ -175,9 +184,11 @@ def source_revision():
         "untracked_paths": ([u for u in untracked.split("\0") if u][:200]
                             if untracked is not None else None),
         "git_errors": errors,
-        # Kept under their old names so earlier readers of the manifest still find them.
+        # The old names, with their old meanings, so earlier manifests compare with this one.
         "build_head": head,
-        "build_dirty": dirty,
+        "build_dirty": build_dirty,
+        "build_dirty_means": "git status --porcelain printed anything: a tracked change or an "
+                             "untracked, unignored file. null = git did not answer.",
         "note": "Read by the harness at launch, for provenance. The repository's .git is never "
                 "staged and is on the denial probe list -- its commit subject lines alone can "
                 "leak a prior run's ancestry call.",
