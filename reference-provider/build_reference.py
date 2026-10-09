@@ -836,8 +836,8 @@ def score_cohort(plink2, ref_vcf, score_input, keep_path, sample_ids, out_prefix
     rather than an inference; and --snps-only just-acgt. The patient's dosages come from an
     SNV-only imputation panel, but this panel is cut from phase3 at the model's positions and
     can carry an indel where the patient has an SNV. Both then get the same @:# ID and
-    --rm-dup drops both, leaving the SNV unscored for the cohort: 21 of 1,093,407 on p29's
-    first run. plink2 applies --snps-only at load, before --rm-dup, so the SNV survives.
+    --rm-dup drops both, leaving the SNV unscored for the cohort: 21 of 1,093,407 on one dev
+    run. plink2 applies --snps-only at load, before --rm-dup, so the SNV survives.
     """
     with open(keep_path, "w") as fh:
         fh.write("#IID\n")

@@ -435,7 +435,7 @@ KEYCHAIN_DIR = os.path.expanduser("~/.claude")
 # provider).
 DEFAULT_MODEL = "claude-opus-5-5"
 
-# Free disk a run past select needs under SANDBOXES. Measured on p29 (2026-10-08): the agent's
+# Free disk a run past select needs under SANDBOXES. Measured 2026-10-08: the agent's
 # own PCA basis (~1 GB once its intermediates are dropped), the genome's imputed output
 # (~7.5 GB: the 302-sample cohort VCFs and the patient's), and the provider's reference panel
 # and work (~2-3 GB). A run that filled the disk mid-imputation was lost outright, ENOSPC in the
