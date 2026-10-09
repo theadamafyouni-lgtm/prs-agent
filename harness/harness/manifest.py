@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import platform
+import shlex
 import socket
 import subprocess
 import threading
@@ -114,16 +115,16 @@ def source_revision():
     every earlier manifest; tracked_dirty counts tracked changes only, staged or not, with
     untracked files listed separately; both are True/False only when git answered and both are
     None when any of their git calls failed; and a dirty tree records its changed paths and
-    the sha256 of `git diff HEAD`. The diff's format is pinned (no external diff, no textconv,
-    no colour, no rename detection, fixed prefixes, full index lines) so the hash depends on
-    the tree, not on whoever's git config ran it. Any git call that failed is named in
-    git_errors and its field is null, never an empty answer."""
+    the sha256 of `git diff HEAD`. The diff's format is pinned, every git setting that changes
+    its bytes (see diff_args), so the hash depends on the tree, not on whoever's git config ran
+    it. Any git call that failed is named in git_errors and its field is null, never an empty
+    answer."""
     errors = []
 
-    def _git(*args, raw=False):
+    def _git(*args, raw=False, env=None):
         try:
             r = subprocess.run(["git", "-C", config.PRODUCT_ROOT] + list(args),
-                               capture_output=True, timeout=20)
+                               capture_output=True, timeout=20, env=env)
         except Exception as exc:  # noqa: BLE001
             errors.append("git %s: %s" % (args[0], exc))
             return None
@@ -152,11 +153,34 @@ def source_revision():
             else:
                 changed.append(path)
     untracked = _git("ls-files", "-z", "--others", "--exclude-standard")
+    # Every git setting that changes the bytes `git diff` prints is pinned here, by option where
+    # git has one (an option beats any config) and by -c where it does not (the command line's
+    # config is read last): the algorithm and its heuristic, context and hunk merging,
+    # prefixes, relative paths, file order, path quoting, blank context lines, submodules,
+    # external diff and textconv, colour, renames, full index lines, binary detection and
+    # the compression of binary patches. Diff drivers are pinned too: no per-user or system
+    # attributes file can assign one, and the default driver's hunk-header pattern is `^$`,
+    # which names no function, so hunk headers carry none (the diff is hashed, never read).
+    # GIT_DIFF_OPTS is dropped because it overrides --unified. Left alone, deliberately: what
+    # decides a file's content (line endings, filters, file mode), because status reads it too
+    # and the diff must describe the change status found; and the attributes the repository
+    # itself carries. Binary patches are zlib output, so their bytes also follow the zlib
+    # build.
+    diff_args = ["-c", "core.quotepath=off",
+                 "-c", "core.bigFileThreshold=512m", "-c", "core.looseCompression=1",
+                 "-c", "core.attributesFile=/dev/null", "-c", "diff.autoRefreshIndex=true",
+                 "-c", "diff.suppressBlankEmpty=false", "-c", "diff.default.binary=auto",
+                 "-c", "diff.default.xfuncname=^$",
+                 "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--no-renames",
+                 "--src-prefix=a/", "--dst-prefix=b/", "--full-index", "--binary",
+                 "--diff-algorithm=myers", "--indent-heuristic", "--unified=3",
+                 "--inter-hunk-context=0", "--no-relative", "-O/dev/null",
+                 "--ignore-submodules=none", "--submodule=short", "HEAD"]
+    diff_env = {k: v for k, v in os.environ.items() if k != "GIT_DIFF_OPTS"}
+    diff_env["GIT_ATTR_NOSYSTEM"] = "1"
     diff = None
     if tracked:
-        diff = _git("-c", "core.quotepath=off", "diff", "--no-ext-diff", "--no-textconv",
-                    "--no-color", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/",
-                    "--full-index", "--binary", "HEAD", raw=True)
+        diff = _git(*diff_args, raw=True, env=diff_env)
     tags = _git("tag", "--points-at", "HEAD") if head else None
     # The original build_dirty check, untracked files included. The mode is passed rather than
     # left to status.showUntrackedFiles, which would otherwise decide it per machine.
@@ -178,8 +202,8 @@ def source_revision():
         "changed_paths": changed[:200] if tracked is not None else None,
         "n_changed_paths": len(changed) if tracked is not None else None,
         "diff_head_sha256": hashlib.sha256(diff).hexdigest() if diff else None,
-        "diff_format": "git diff --no-ext-diff --no-textconv --no-color --no-renames "
-                       "--src-prefix=a/ --dst-prefix=b/ --full-index --binary HEAD",
+        "diff_format": "env -u GIT_DIFF_OPTS GIT_ATTR_NOSYSTEM=1 "
+                       + shlex.join(["git"] + diff_args),
         "git_version": (lambda v: v.strip() if v else None)(_git("--version")),
         "untracked_paths": ([u for u in untracked.split("\0") if u][:200]
                             if untracked is not None else None),
