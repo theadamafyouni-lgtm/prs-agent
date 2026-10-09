@@ -872,11 +872,12 @@ def environment_failure_reason(rc, stdout, stderr, messages_routed):
 # ---------------------------------------------------------------------------
 # Did the reference provider answer?
 #
-# A provider that never answers, or whose build fails, is the environment failing as well,
-# not a judgment: none of score, refuse or stop describes it, so the agent is told to say why
-# and end the run without a result (interpret/SKILL.md), and no outcome is added for it. The
-# harness ran the provider and knows what came back, so the call is the harness's, made from
-# its own record of every handoff and never from anything the agent wrote.
+# A provider that runs out its own time without answering, or whose build fails, is the
+# environment failing as well, not a judgment: none of score, refuse or stop describes it, so
+# the agent is told to say why and end the run without a result (interpret/SKILL.md), and no
+# outcome is added for it. The harness ran the provider and knows what came back, so the call
+# is the harness's, made from its own record of every handoff and never from anything the
+# agent wrote.
 #
 # A provider that answered with a refusal -- a well-formed artifact saying no usable group
 # could be built for this person -- did answer. That is INT-2's refusal, a correct outcome,
@@ -891,26 +892,39 @@ def provider_blocked_reason(int1, result_valid):
     by reference_adapter.py's verdict on the delivered bytes, which _contract_check keeps on
     each handoff. And the run ended without a valid result.
 
-    Not the provider's: a request refused because it named a path outside the agent's own run
-    is the agent's to rebuild, and a run that ends there is a finding. Nor a run that reached
-    a valid result anyway -- a session the person ended while the reference was being built,
-    or a placement made with no reference at all -- because that run concluded something, and
-    it is filed and graded on what it concluded.
+    Not the provider's, and filed as the agent's result:
+      * a request refused for the agent's own request or files -- a path outside its run, or
+        an input its run holds more than one copy of (the harness looks for each only inside
+        runs/<RUN>/, which only the agent writes to). Both are the agent's to fix;
+      * a provider the run outlived: stopped, never started, or still running when the
+        agent's run ended. The provider did not fail. The run ended first, because the agent
+        stopped before the reply or because the run's own time cap came first; its own 6 h
+        cap is a different thing, recorded as the provider not finishing, and stays blocked;
+      * a run that reached a valid result anyway -- a session the person ended while the
+        reference was being built, or a placement made with no reference at all -- because
+        that run concluded something, and it is filed and graded on what it concluded.
 
     The asymmetry is environment_failure_reason's: a delivered artifact the harness could not
     check counts as not usable, because a false positive costs one re-run.
     """
     if result_valid:
         return None
+    handoffs = (int1 or {}).get("handoffs") or []
+    # One provider runs at a time, so the one finish() could not stop is the last handoff.
+    running_at_finish = bool((int1 or {}).get("provider_still_running_at_finish"))
     blocked = []
-    for h in (int1 or {}).get("handoffs") or []:
+    for i, h in enumerate(handoffs):
         res = h.get("result") if isinstance(h.get("result"), dict) else {}
-        staging = h.get("staging")
-        if res.get("status") == "error" and (
-                not isinstance(staging, dict) or staging.get("refused_path")):
+        staging = h.get("staging") if isinstance(h.get("staging"), dict) else None
+        status = res.get("status")
+        if status == "error" and (staging is None or staging.get("refused_path")
+                                  or staging.get("ambiguous_input")):
+            continue
+        if status in ("stopped_at_finish", "not_started_at_finish") or (
+                not res and running_at_finish and i == len(handoffs) - 1):
             continue
         check = res.get("contract_check") if isinstance(res.get("contract_check"), dict) else {}
-        if res.get("status") in ("delivered", "unusable") and check.get("adapter_exit") in (0, 5):
+        if status in ("delivered", "unusable") and check.get("adapter_exit") in (0, 5):
             return None
         blocked.append((res, check))
     if not blocked:
@@ -927,15 +941,8 @@ def provider_blocked_reason(int1, result_valid):
                     "exit %s): %s" % (check.get("adapter_exit"), check.get("detail")))
     elif status == "unavailable":
         what = "the provider sent back nothing the harness could read: %s" % res.get("reason")
-    elif status == "stopped_at_finish":
-        what = ("the provider had not answered when the agent's run ended, and was stopped "
-                "(provider exit %s)" % res.get("provider_rc"))
-    elif status == "not_started_at_finish":
-        what = "the agent's run ended before the provider started"
     elif status == "error":
         what = "the request was not answered: %s" % res.get("reason")
-    elif (int1 or {}).get("provider_still_running_at_finish"):
-        what = "the provider was still running when the agent's run ended"
     else:
         what = "the request never completed: %s" % (
             "; ".join((int1 or {}).get("routing_errors") or []) or "no reason recorded")
